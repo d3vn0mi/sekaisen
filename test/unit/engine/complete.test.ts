@@ -3,7 +3,6 @@ import {
   stageCompleteTool,
   stageProgressTool,
 } from "../../../src/completion/tools.js";
-import { mintToken } from "../../../src/engine/tokens.js";
 import { lastToken, type Rig, rig, variant } from "./engine-helpers.js";
 
 const rigs: Rig[] = [];
@@ -212,7 +211,7 @@ describe("stage_complete", () => {
     const r = await make();
     await started(r);
     const result = await r.engine.complete({
-      token: mintToken().token,
+      token: "an-unknown-token-that-no-attempt-was-handed",
       outcome: "blocked",
     });
     expect(result).toEqual({
