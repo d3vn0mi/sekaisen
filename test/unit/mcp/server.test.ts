@@ -1,4 +1,10 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -7,7 +13,7 @@ import { FakeAdapter } from "../../../src/adapter/fake.js";
 import { Engine } from "../../../src/engine/engine.js";
 import { createRegistry } from "../../../src/host/registry.js";
 import { main } from "../../../src/mcp/main.js";
-import { createMcpServer } from "../../../src/mcp/server.js";
+import { createMcpServer, MAX_LINE_LENGTH } from "../../../src/mcp/server.js";
 import { openSqliteStore } from "../../../src/store/sqlite.js";
 import type { Store } from "../../../src/store/types.js";
 import { lastToken, reviewLoop, SwapSource } from "../engine/engine-helpers.js";
@@ -300,6 +306,80 @@ describe("mcp server", () => {
   });
 });
 
+describe("mcp input handling", () => {
+  it("drops an over-long line, answers -32600, then serves the next request", async () => {
+    const { completion } = await pair();
+    const w = wire(completion);
+    w.raw("x".repeat(MAX_LINE_LENGTH + 10));
+    w.send({ jsonrpc: "2.0", id: 1, method: "ping" });
+    const err = await w.next();
+    expect(err.id).toBeNull();
+    expect(err.error).toEqual({ code: -32600, message: "line too long" });
+    expect((await w.next()).id).toBe(1);
+  });
+
+  it("drops an over-long line that arrives in many chunks", async () => {
+    const { completion } = await pair();
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const server = createMcpServer({ engine: completion, input, output });
+    cleanup.push(() => server.close());
+    const chunk = "y".repeat(64 * 1024);
+    for (let i = 0; i < 20; i++) input.write(chunk);
+    input.write(
+      `\n${JSON.stringify({ jsonrpc: "2.0", id: 9, method: "ping" })}\n`,
+    );
+    input.end();
+    await server.done;
+    const lines = (output.read() as Buffer).toString().trim().split("\n");
+    expect(
+      lines.map((l) => JSON.parse(l).error?.message ?? JSON.parse(l).id),
+    ).toEqual(["line too long", 9]);
+  });
+
+  it("parses CRLF lines and a multi-byte character split across chunks", async () => {
+    const { completion } = await pair();
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const server = createMcpServer({ engine: completion, input, output });
+    cleanup.push(() => server.close());
+    const bytes = Buffer.from(
+      `${JSON.stringify({ jsonrpc: "2.0", id: "é€", method: "ping" })}\r\n`,
+    );
+    const cut = bytes.indexOf(0xe2) + 1; // inside the euro sign
+    input.write(bytes.subarray(0, cut));
+    input.write(bytes.subarray(cut));
+    input.end();
+    await server.done;
+    const reply = JSON.parse((output.read() as Buffer).toString());
+    expect(reply.id).toBe("é€");
+  });
+
+  it("a stage_complete call with missing arguments is a tool error", async () => {
+    const { completion } = await pair();
+    const w = wire(completion);
+    w.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "stage_complete" },
+    });
+    const r = await w.next();
+    expect(r.result.isError).toBe(true);
+    expect(r.result.content[0].text).toMatch(/token must be a string/);
+  });
+
+  it("a broken output pipe closes the server without throwing", async () => {
+    const { completion } = await pair();
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const server = createMcpServer({ engine: completion, input, output });
+    cleanup.push(() => server.close());
+    output.emit("error", new Error("EPIPE"));
+    await server.done;
+  });
+});
+
 describe("sekaisen-mcp main", () => {
   function io() {
     const err: string[] = [];
@@ -336,6 +416,91 @@ describe("sekaisen-mcp main", () => {
     );
     expect(code).toBe(2);
     expect(b.err.join("")).toMatch(/at least 32 raw bytes/);
+  });
+
+  it("warns on a group-readable secret and exits 2 on an unopenable store", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "sekaisen-mcp-"));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    const secret = path.join(dir, "secret");
+    writeFileSync(secret, Buffer.from(SECRET), { mode: 0o644 });
+    const t = io();
+    const code = await main(
+      [
+        "--store",
+        path.join(dir, "missing", "s.db"),
+        "--definitions",
+        dir,
+        "--token-secret-file",
+        secret,
+      ],
+      t.io,
+    );
+    expect(code).toBe(2);
+    const text = t.err.join("");
+    expect(text).toMatch(/readable by group or others/);
+    expect(text).toMatch(/cannot open the store/);
+  });
+
+  it("warns on a duplicate pipeline id across definition files", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "sekaisen-mcp-"));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    const defs = path.join(dir, "defs");
+    mkdirSync(defs);
+    const src = path.resolve("test/fixtures/defs/review-loop/pipeline.yaml");
+    copyFileSync(src, path.join(defs, "a.yaml"));
+    copyFileSync(src, path.join(defs, "b.yaml"));
+    const secret = path.join(dir, "secret");
+    writeFileSync(secret, Buffer.from(SECRET), { mode: 0o600 });
+    const t = io();
+    t.input.end();
+    const code = await main(
+      [
+        "--store",
+        path.join(dir, "s.db"),
+        "--definitions",
+        defs,
+        "--token-secret-file",
+        secret,
+      ],
+      t.io,
+    );
+    expect(code).toBe(0);
+    expect(t.err.join("")).toMatch(/duplicate pipeline id review-loop/);
+  });
+
+  it("answers a tools/call end to end", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "sekaisen-mcp-"));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    const secret = path.join(dir, "secret");
+    writeFileSync(secret, Buffer.from(SECRET), { mode: 0o600 });
+    const t = io();
+    const running = main(
+      [
+        "--store",
+        path.join(dir, "s.db"),
+        "--definitions",
+        path.resolve("test/fixtures/defs"),
+        "--token-secret-file",
+        secret,
+      ],
+      t.io,
+    );
+    t.input.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "stage_complete",
+          arguments: { token: "nope", outcome: "drafted" },
+        },
+      })}\n`,
+    );
+    t.input.end();
+    expect(await running).toBe(0);
+    const reply = JSON.parse((t.output.read() as Buffer).toString());
+    expect(reply.result.isError).toBe(true);
+    expect(reply.result.content[0].type).toBe("text");
   });
 
   it("serves tools over the streams and exits 0 when stdin closes", async () => {

@@ -9,6 +9,7 @@ import { type DefinitionSource, Engine } from "../engine/engine.js";
 import { type LoadedDefinition, loadDefinition } from "../format/load.js";
 import { createRegistry } from "../host/registry.js";
 import { openSqliteStore } from "../store/sqlite.js";
+import type { Store } from "../store/types.js";
 import { createMcpServer } from "./server.js";
 
 export const MCP_USAGE =
@@ -55,7 +56,13 @@ async function loadSource(dir: string, io: McpIo): Promise<DefinitionSource> {
   for (const file of definitionFiles(dir)) {
     try {
       const loaded = await loadDefinition(file);
-      defs.set(loaded.def.id, loaded);
+      const id = loaded.def.id;
+      if (defs.has(id)) {
+        io.err(
+          `sekaisen-mcp: duplicate pipeline id ${id} in ${file}; the later file wins\n`,
+        );
+      }
+      defs.set(id, loaded);
     } catch (x) {
       io.err(`sekaisen-mcp: skipped ${file}: ${(x as Error).message}\n`);
     }
@@ -96,6 +103,11 @@ export async function main(argv: string[], io: McpIo): Promise<number> {
   let secret: Buffer;
   try {
     secret = readFileSync(secretFile);
+    if ((statSync(secretFile).mode & 0o077) !== 0) {
+      io.err(
+        `sekaisen-mcp: warning: ${secretFile} is readable by group or others; chmod 600 it\n`,
+      );
+    }
   } catch (x) {
     io.err(`cannot read the token secret file: ${(x as Error).message}\n`);
     return 2;
@@ -113,7 +125,13 @@ export async function main(argv: string[], io: McpIo): Promise<number> {
     io.err(`cannot read the definitions directory: ${(x as Error).message}\n`);
     return 2;
   }
-  const db = openSqliteStore(store);
+  let db: Store;
+  try {
+    db = openSqliteStore(store);
+  } catch (x) {
+    io.err(`cannot open the store ${store}: ${(x as Error).message}\n`);
+    return 2;
+  }
   const engine = new Engine({
     store: db,
     adapter: noHarness,

@@ -1,5 +1,5 @@
-import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 import {
   type CompletionTool,
   stageCompleteTool,
@@ -12,10 +12,16 @@ import { VERSION } from "../index.js";
 export const PROTOCOL_VERSION = "2025-06-18";
 const SUPPORTED_VERSIONS = [PROTOCOL_VERSION, "2025-03-26", "2024-11-05"];
 
+/** Longest line, in characters, the server keeps while waiting for its newline. */
+export const MAX_LINE_LENGTH = 1024 * 1024;
+/** Requests waiting for an answer beyond which the input is paused. */
+export const MAX_PENDING = 64;
+
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
 const METHOD_NOT_FOUND = -32601;
 const INVALID_PARAMS = -32602;
+const INTERNAL_ERROR = -32603;
 
 type Id = string | number | null;
 
@@ -97,11 +103,25 @@ export function createMcpServer(o: McpServerOptions): McpServer {
       return fail(null, INVALID_REQUEST, "id must be a string or number");
     }
     if (!isRequest) return; // a notification, initialized or not, gets no answer
-    switch (msg.method) {
+    try {
+      await dispatch(id, msg.method, msg.params);
+    } catch (err) {
+      fail(
+        id,
+        INTERNAL_ERROR,
+        err instanceof Error ? err.message : "internal error",
+      );
+    }
+  }
+
+  async function dispatch(
+    id: Id,
+    method: string,
+    params: unknown,
+  ): Promise<void> {
+    switch (method) {
       case "initialize": {
-        const asked = isObject(msg.params)
-          ? msg.params.protocolVersion
-          : undefined;
+        const asked = isObject(params) ? params.protocolVersion : undefined;
         return send({
           id,
           result: {
@@ -128,34 +148,104 @@ export function createMcpServer(o: McpServerOptions): McpServer {
           },
         });
       case "tools/call":
-        return call(id, msg.params);
+        return call(id, params);
       default:
-        return fail(id, METHOD_NOT_FOUND, `method not found: ${msg.method}`);
+        return fail(id, METHOD_NOT_FOUND, `method not found: ${method}`);
     }
   }
 
-  const lines = createInterface({ input: o.input, crlfDelay: Infinity });
   let queue: Promise<void> = Promise.resolve();
-  lines.on("line", (line) => {
-    if (line.trim() === "") return;
+  let pending = 0;
+  let paused = false;
+  const enqueue = (job: () => Promise<void> | void): void => {
+    pending++;
+    if (pending > MAX_PENDING && !paused) {
+      paused = true;
+      o.input.pause();
+    }
     queue = queue
-      .then(() => handle(line))
+      .then(job)
       .catch((err) => {
         console.error(
           `sekaisen-mcp: ${err instanceof Error ? err.message : err}`,
         );
+      })
+      .then(() => {
+        pending--;
+        if (paused && pending <= MAX_PENDING / 2) {
+          paused = false;
+          if (!closed) o.input.resume();
+        }
       });
-  });
+  };
+
+  const decoder = new StringDecoder("utf8");
+  let buf = "";
+  let dropping = false;
+  const tooLong = (): void =>
+    enqueue(() => fail(null, INVALID_REQUEST, "line too long"));
+  const takeLine = (line: string): void => {
+    const text = line.endsWith("\r") ? line.slice(0, -1) : line;
+    if (text.trim() === "") return;
+    enqueue(() => handle(text));
+  };
+  const feed = (text: string): void => {
+    let rest = text;
+    while (rest.length > 0) {
+      const nl = rest.indexOf("\n");
+      if (dropping) {
+        if (nl < 0) return;
+        dropping = false;
+        rest = rest.slice(nl + 1);
+        continue;
+      }
+      if (nl < 0) {
+        buf += rest;
+        if (buf.length > MAX_LINE_LENGTH) {
+          buf = "";
+          dropping = true;
+          tooLong();
+        }
+        return;
+      }
+      const line = buf + rest.slice(0, nl);
+      buf = "";
+      rest = rest.slice(nl + 1);
+      if (line.length > MAX_LINE_LENGTH) tooLong();
+      else takeLine(line);
+    }
+  };
+
+  let finish: () => void = () => {};
   const done = new Promise<void>((resolve) => {
-    lines.on("close", () => {
-      queue.then(() => resolve());
-    });
+    finish = resolve;
   });
+  let ended = false;
+  const end = (): void => {
+    if (ended) return;
+    ended = true;
+    if (!dropping && buf !== "") takeLine(buf + decoder.end());
+    buf = "";
+    queue.then(() => finish());
+  };
+  const onData = (chunk: Buffer | string): void =>
+    feed(typeof chunk === "string" ? chunk : decoder.write(chunk));
+  const onFail = (err: Error): void => {
+    console.error(`sekaisen-mcp: ${err.message}`);
+    closed = true;
+    end();
+  };
+  o.input.on("data", onData);
+  o.input.on("end", end);
+  o.input.on("close", end);
+  o.input.on("error", onFail);
+  o.output.on("error", onFail);
 
   return {
     close() {
       closed = true;
-      lines.close();
+      o.input.off("data", onData);
+      end();
     },
     done,
   };
