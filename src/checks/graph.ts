@@ -1,5 +1,6 @@
 import type { LoadedDefinition } from "../format/load.js";
 import { edgesOf } from "./edges.js";
+import { canFail, failedEnd } from "./failure.js";
 import type { Finding } from "./index.js";
 
 const err = (stage: string, message: string): Finding => ({
@@ -25,7 +26,23 @@ export function graphFindings(loaded: LoadedDefinition): Finding[] {
   const { def } = loaded;
   const out: Finding[] = [];
   const ids = Object.keys(def.stages);
-  const edges = edgesOf(def).filter((e) => e.to in def.stages);
+  const edges: Array<{ from: string; to: string }> = edgesOf(def).filter(
+    (e) => e.to in def.stages,
+  );
+  // A stage that can fail without an `onExhausted` goes to the first failed
+  // end, an edge the definition does not write out.
+  const failed = failedEnd(def);
+  if (failed !== undefined) {
+    for (const [id, stage] of Object.entries(def.stages)) {
+      const own =
+        stage.type === "agent" || stage.type === "action"
+          ? stage.onExhausted
+          : undefined;
+      if (canFail(stage) && own === undefined) {
+        edges.push({ from: id, to: failed });
+      }
+    }
+  }
 
   for (const [id, stage] of Object.entries(def.stages)) {
     if (stage.type !== "agent" && stage.type !== "gate") continue;

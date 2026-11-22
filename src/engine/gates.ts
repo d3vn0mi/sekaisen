@@ -272,7 +272,10 @@ function openGate(
   const opened = { ...row, ...patch };
   if (!operator) return { row: opened, ctx };
   const rctx = withRunStatus(ctx, "input_required");
-  emitGate(rctx, opened, gate);
+  // A gate first seen at or past its timeout is not announced here: it
+  // takes its timeout edge, or its first reminder announces it, in the same
+  // transaction.
+  if (ctx.now < timeoutAt) emitGate(rctx, opened, gate);
   return { row: opened, ctx: rctx };
 }
 

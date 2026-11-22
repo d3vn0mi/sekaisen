@@ -190,14 +190,7 @@ export function admission(
   if (run?.status !== "working") return undefined;
   const def = c.pinned.of(c.t, run).def;
   const expect = { state: "submitted" as const, attempt: row.attempt };
-  if (def.stages[row.stage]?.type !== "agent") {
-    // Every other stage type is the tick's own; a row without a wake time
-    // (written before stage runs had one) is handed to it.
-    if (row.wakeAt === null) {
-      c.t.updateStageRunIf(row.stageRunId, expect, { wakeAt: c.now });
-    }
-    return undefined;
-  }
+  if (def.stages[row.stage]?.type !== "agent") return undefined;
   const reason = providerPause(
     row,
     def.providers,

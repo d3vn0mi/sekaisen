@@ -263,20 +263,6 @@ describe("persistence", () => {
     raw.close();
   });
 
-  it("migrates a version 1 store, keeping its rows", () => {
-    const file = tmpFile();
-    const raw = new DatabaseSync(file);
-    raw.exec(MIGRATIONS[0] as string);
-    raw.exec("INSERT INTO meta (key, value) VALUES ('schema_version', '1')");
-    raw.close();
-    const store = open(file);
-    store.tx((t) => {
-      seed(t);
-      t.insertStageRun(stageRun({ wakeAt: 7 }));
-      expect(t.getStageRun("s1")?.wakeAt).toBe(7);
-    });
-  });
-
   it("schema_version mismatch refuses to open", () => {
     const file = tmpFile();
     open(file).close();

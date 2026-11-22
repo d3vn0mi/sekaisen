@@ -21,6 +21,7 @@ import {
   type Outcome,
   type ProviderPolicy,
   parseDuration,
+  type RetryEnding,
   type RetryPolicy,
   type Stage,
   type WaitStage,
@@ -40,10 +41,23 @@ type Raw = Record<string, unknown>;
 /** Applied to agent stages when neither the stage nor the defaults give a retry. */
 const agentRetry = (): RetryPolicy => ({ max: 1, on: ["lost"] });
 const otherRetry = (): RetryPolicy => ({ max: 0, on: [] });
-const copyRetry = (r: RetryPolicy): RetryPolicy => ({
-  max: r.max,
-  on: [...r.on],
-});
+
+/**
+ * What a `retry` given without `on` retries: for an agent, a turn lost to a
+ * restart; for an action, a call that threw or ran past the call timeout.
+ */
+const DEFAULT_RETRY_ON: Record<"agent" | "action", RetryEnding[]> = {
+  agent: ["lost"],
+  action: ["turn_error", "timeout"],
+};
+
+/** A retry as written: `on` may be left out. */
+type RawRetry = { max: number; on?: RetryEnding[] };
+
+/** The stage's policy from a retry as written, filling `on` for its type. */
+function fillRetry(r: RawRetry, kind: "agent" | "action"): RetryPolicy {
+  return { max: r.max, on: [...(r.on ?? DEFAULT_RETRY_ON[kind])] };
+}
 const RESERVED_TYPES = ["subpipeline", "parallel"];
 
 let cachedSchema: JsonSchema | undefined;
@@ -80,12 +94,22 @@ function duration(v: unknown): Duration | undefined {
   return typeof v === "string" ? parseDuration(v) : undefined;
 }
 
-function retryOf(v: unknown): RetryPolicy | undefined {
+function retryOf(v: unknown): RawRetry | undefined {
   if (!isObject(v)) return undefined;
-  return {
-    max: v.max as number,
-    on: ((v.on as RetryPolicy["on"] | undefined) ?? []).slice(),
-  };
+  const r: RawRetry = { max: v.max as number };
+  if (Array.isArray(v.on)) r.on = (v.on as RetryEnding[]).slice();
+  return r;
+}
+
+/** The stage's own retry, else the defaults' one, else the type's default policy. */
+function stageRetry(
+  raw: unknown,
+  defaults: Defaults,
+  kind: "agent" | "action",
+): RetryPolicy {
+  const given = retryOf(raw) ?? defaults.retry;
+  if (given) return fillRetry(given, kind);
+  return kind === "agent" ? agentRetry() : otherRetry();
 }
 
 function nextOf(v: unknown): Next {
@@ -159,7 +183,7 @@ function providersOf(v: unknown): ProviderPolicy {
 
 interface Defaults {
   deadline?: Duration;
-  retry?: RetryPolicy;
+  retry?: RawRetry;
 }
 
 function stageOf(
@@ -178,9 +202,7 @@ function stageOf(
         session: (raw.session as "run" | "project" | undefined) ?? "run",
         brief: raw.brief as string,
         turns: { max: (turns.max as number | undefined) ?? 1 },
-        retry:
-          retryOf(raw.retry) ??
-          (defaults.retry ? copyRetry(defaults.retry) : agentRetry()),
+        retry: stageRetry(raw.retry, defaults, "agent"),
         outcomes: outcomesOf(raw.outcomes, where, problems),
       };
       const cap = duration(turns.cap);
@@ -233,9 +255,7 @@ function stageOf(
         type: "action",
         action: raw.action as string,
         next: raw.next as string,
-        retry:
-          retryOf(raw.retry) ??
-          (defaults.retry ? copyRetry(defaults.retry) : otherRetry()),
+        retry: stageRetry(raw.retry, defaults, "action"),
       };
       if (typeof raw.on_exhausted === "string") {
         stage.onExhausted = raw.on_exhausted;

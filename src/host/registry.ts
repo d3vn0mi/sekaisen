@@ -12,6 +12,14 @@ export interface StageCtx {
   now: number;
 }
 
+/*
+ * Host functions are called by the engine's tick, outside any transaction,
+ * each bounded by the engine's call timeout (`adapterCallTimeoutMs`). A call
+ * that throws ends its attempt as `turn_error`; one that outlives the timeout
+ * ends as `timeout` (a fact backs off instead). An action's `retry.on` names
+ * which of the two it retries; without `on` it retries both.
+ */
+
 /** Returns the name of the outcome to follow. */
 export type CheckFn = (ctx: StageCtx) => Promise<string>;
 export type ActionFn = (

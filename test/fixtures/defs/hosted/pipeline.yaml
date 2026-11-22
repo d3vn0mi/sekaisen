@@ -10,3 +10,4 @@ stages:
       yes: done
       no: done
   done: { type: end, status: completed }
+  failed: { type: end, status: failed }

@@ -64,7 +64,10 @@ export interface StageRunRow {
    * late call is recognised and refused rather than taken as unknown.
    */
   tokenHash: string | null;
-  /** `${runId}:${stage}:${attempt}`, derived by the store on insert and immutable. */
+  /**
+   * `${runId}:${stage}:${attempt}`, derived by the store on insert and
+   * immutable; the definition's cancel action is keyed `${runId}:cancel`.
+   */
   idempotencyKey: string;
   adapterRunId: string | null;
   sessionKey: string | null;
@@ -144,7 +147,7 @@ export interface LimitRow {
   setAt: number;
 }
 
-/** A stage run as a caller supplies it; the store adds the idempotency key. */
+/** A stage run as a caller supplies it; the store adds the idempotency key (see `insertStageRun`). */
 export type NewStageRun = Omit<StageRunRow, "idempotencyKey">;
 
 /** How the store keys a new stage run. */
@@ -200,7 +203,10 @@ export interface StoreTx {
     patch: RunPatch,
   ): boolean;
 
-  /** The store derives `idempotencyKey` from run, stage and attempt. */
+  /**
+   * The store derives `idempotencyKey` from run, stage and attempt, except
+   * for the cancel action (`opts.cancelAction`), keyed `${runId}:cancel`.
+   */
   insertStageRun(row: NewStageRun, opts?: InsertStageRunOptions): void;
   getStageRun(stageRunId: string): StageRunRow | undefined;
   /** The newest stage run of the run that is submitted, working or input_required. */

@@ -41,7 +41,13 @@ export interface GateStage {
   who?: "operator";
   poll?: { fact: string; every: Duration };
   prompt?: string;
+  /** Counted from when the gate is entered. */
   timeout: Duration;
+  /**
+   * What happens once `timeout` passes: take the `next` edge, or remind (the
+   * first reminder fires at the timeout, then one every `remind`, and the gate
+   * keeps waiting).
+   */
   onTimeout: { remind?: Duration } | { next: string };
   outcomes: Record<string, Outcome>;
 }
@@ -86,7 +92,12 @@ export interface Definition {
   title?: string;
   version: number;
   inputs?: JsonSchema;
-  defaults?: { deadline?: Duration; retry?: RetryPolicy; priority?: number };
+  defaults?: {
+    deadline?: Duration;
+    /** As written: without `on`, each stage gets its own type's default `on`. */
+    retry?: { max: number; on?: RetryEnding[] };
+    priority?: number;
+  };
   providers: ProviderPolicy;
   start: string;
   stages: Record<string, Stage>;

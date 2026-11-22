@@ -65,12 +65,17 @@ export function stepStage(
     return actionCall(c, ctx, row, stage, true);
   }
   if (run.status !== "working" && run.status !== "input_required") {
-    // The run ended under a live stage run; nothing is left to do for it.
-    c.t.updateStageRunIf(
-      row.stageRunId,
-      { state: row.state, attempt: row.attempt },
-      { wakeAt: null },
-    );
+    // The run ended under a live stage run (the engine never leaves one so);
+    // end it rather than leave it live with nothing to wake it.
+    move(ctx, row, "canceled", {
+      state: "canceled",
+      endedAt: c.now,
+      waitReason: null,
+      wakeAt: null,
+    });
+    append(ctx, transition(row, "canceled", "orphaned_stage_run"), {
+      run: run.status,
+    });
     return undefined;
   }
   switch (stage?.type) {

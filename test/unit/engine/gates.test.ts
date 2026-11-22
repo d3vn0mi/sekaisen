@@ -106,11 +106,11 @@ describe("operator gates", () => {
     });
 
     await expect(
-      r.engine.resolveGate(gate.stageRunId, "ship", "hud"),
+      r.engine.resolveGate(gate.stageRunId, "ship", "api"),
     ).rejects.toThrow(
       'unknown outcome "ship" for gate publish; declared outcomes: approve, reject',
     );
-    await r.engine.resolveGate(gate.stageRunId, "approve", "hud", "looks good");
+    await r.engine.resolveGate(gate.stageRunId, "approve", "api", "looks good");
 
     const after = r.engine.status(runId);
     expect(after.run.status).toBe("completed");
@@ -118,20 +118,20 @@ describe("operator gates", () => {
     const row = r.store.tx((t) => t.getStageRun(gate.stageRunId));
     expect(row).toMatchObject({ state: "completed", outcome: "approve" });
     expect(r.store.tx((t) => t.getGate(gate.stageRunId))).toMatchObject({
-      resolvedBy: "hud",
+      resolvedBy: "api",
       resolvedAt: 1_000_000,
     });
     const resolved = after.transitions.find((x) => x.event === "gate_resolved");
     expect(resolved).toMatchObject({
-      actor: "hud",
+      actor: "api",
       outcome: "approve",
       fromState: "input_required",
       toState: "completed",
       detail: { note: "looks good", next: "done" },
     });
     await expect(
-      r.engine.resolveGate(gate.stageRunId, "reject", "telegram:1"),
-    ).rejects.toThrow("gate already resolved by hud");
+      r.engine.resolveGate(gate.stageRunId, "reject", "operator:b"),
+    ).rejects.toThrow("gate already resolved by api");
   });
 
   it("gate reminder fires at remind interval on the virtual clock", async () => {
@@ -226,9 +226,43 @@ describe("operator gates", () => {
       toState: "failed",
       detail: { timeoutAt: 1_000_000 + HOUR, next: "late" },
     });
-    await expect(r.engine.resolveGate(id, "go", "hud")).rejects.toThrow(
+    await expect(r.engine.resolveGate(id, "go", "api")).rejects.toThrow(
       "gate already resolved by timeout",
     );
+  });
+
+  it("a gate first seen past its timeout with next emits nothing", async () => {
+    const r = await gated({
+      who: "operator",
+      timeout: HOUR,
+      onTimeout: { next: "late" },
+    });
+    const seen = gateEvents(r);
+    const { runId } = await r.engine.startRun("held", {});
+    r.clock.advance(2 * HOUR);
+    await r.engine.tick();
+    expect(seen).toEqual([]);
+    expect(r.engine.status(runId).run).toMatchObject({
+      status: "canceled",
+      currentStage: "late",
+    });
+  });
+
+  it("a gate first seen past its timeout with remind emits once", async () => {
+    const r = await gated({
+      who: "operator",
+      timeout: HOUR,
+      onTimeout: { remind: 10 * MIN },
+    });
+    const seen = gateEvents(r);
+    const { runId } = await r.engine.startRun("held", {});
+    r.clock.advance(2 * HOUR);
+    await r.engine.tick();
+    expect(seen).toHaveLength(1);
+    expect(events(r, runId).filter((e) => e === "gate_reminder")).toHaveLength(
+      1,
+    );
+    expect(r.engine.status(runId).run.status).toBe("input_required");
   });
 
   it("refuses to resolve what is not an open operator gate", async () => {
@@ -240,17 +274,17 @@ describe("operator gates", () => {
     const { runId } = await r.engine.startRun("held", {});
     const id = live(r, runId).stageRunId;
     // Not opened until the tick runs it.
-    await expect(r.engine.resolveGate(id, "go", "hud")).rejects.toThrow(
+    await expect(r.engine.resolveGate(id, "go", "api")).rejects.toThrow(
       `stage run ${id} is not waiting on a gate`,
     );
-    await expect(r.engine.resolveGate("nope", "go", "hud")).rejects.toThrow(
+    await expect(r.engine.resolveGate("nope", "go", "api")).rejects.toThrow(
       "unknown stage run nope",
     );
     await r.engine.tick();
     await expect(r.engine.resolveGate(id, "go", "")).rejects.toThrow(
       "resolveGate needs who resolved the gate",
     );
-    await r.engine.resolveGate(id, "go", "hud");
+    await r.engine.resolveGate(id, "go", "api");
     expect(r.engine.status(runId).run.status).toBe("completed");
   });
 });
@@ -320,7 +354,7 @@ describe("poll gates", () => {
       resolvedBy: "fact:demo.ready",
     });
     expect(seen).toEqual([]);
-    await expect(r.engine.resolveGate(id, "go", "hud")).rejects.toThrow(
+    await expect(r.engine.resolveGate(id, "go", "api")).rejects.toThrow(
       "gate already resolved by fact:demo.ready",
     );
   });
@@ -338,7 +372,7 @@ describe("poll gates", () => {
     await r.engine.tick();
     const id = live(r, runId).stageRunId;
     expect(live(r, runId).state).toBe("working");
-    await expect(r.engine.resolveGate(id, "go", "hud")).rejects.toThrow(
+    await expect(r.engine.resolveGate(id, "go", "api")).rejects.toThrow(
       `stage run ${id} is a poll gate; it passes when its fact holds`,
     );
     r.clock.advance(HOUR);

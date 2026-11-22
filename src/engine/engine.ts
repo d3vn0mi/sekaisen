@@ -100,7 +100,8 @@ export interface EngineOptions {
    * Longest the engine waits on any one harness call or host function (a
    * check, action or fact), in milliseconds; 30000 by default. A call that
    * takes longer is treated as one that failed, so a hung harness or host
-   * function cannot stall the tick.
+   * function cannot stall the tick. A host function past it ends its attempt
+   * as `timeout` (a thrown error is `turn_error`).
    */
   adapterCallTimeoutMs?: number;
   /** The timers behind `adapterCallTimeoutMs`; real ones by default. */
@@ -705,18 +706,24 @@ export class Engine {
     // same one, and a continuation carries the first turn's token.
     const token = deriveToken(this.tokenSecret, row.idempotencyKey);
     const hash = hashToken(token);
-    let text: string;
-    try {
-      text =
-        row.turnsUsed === 0
-          ? this.renderFor(t, run, pinned, stage, token)
-          : renderContinuation(row.progressNote, token, stage.outcomes);
-    } catch (err) {
-      // A brief that cannot be rendered never will be: refuse the stage run
-      // rather than try it again on every tick.
-      rejectStageRun(this.ctx(t, run, emit), row, errorMessage(err));
+    // Store reads happen out here: a store error propagates and the row is
+    // tried again on the next tick. Only a brief that can never be rendered
+    // refuses the stage run.
+    const message =
+      row.turnsUsed === 0
+        ? this.briefFor(
+            run,
+            pinned,
+            stage,
+            token,
+            stageFields(t, run.runId, pinned.def),
+          )
+        : { text: renderContinuation(row.progressNote, token, stage.outcomes) };
+    if ("refused" in message) {
+      rejectStageRun(this.ctx(t, run, emit), row, message.refused);
       return undefined;
     }
+    const text = message.text;
     // The hash is set when the attempt is first dispatched. A different one
     // means the secret changed (a restart without a configured secret). A
     // turn the harness may already hold carries the old token, so the new
@@ -856,24 +863,33 @@ export class Engine {
     return completed ? undefined : adapterRunId;
   }
 
-  private renderFor(
-    t: StoreTx,
+  /** The first turn's brief, or why it can never be rendered. */
+  private briefFor(
     run: RunRow,
     pinned: Pinned,
     stage: AgentStage,
     token: string,
-  ): string {
+    stages: Record<string, Record<string, unknown>>,
+  ): { text: string } | { refused: string } {
     const template = pinned.briefs[stage.brief];
     if (template === undefined) {
-      throw new Error(`brief ${stage.brief} is missing from the definition`);
+      return { refused: `brief ${stage.brief} is missing from the definition` };
     }
-    return renderBrief(template, {
-      inputs: run.inputs,
-      runId: run.runId,
-      stages: stageFields(t, run.runId, pinned.def),
-      outcomes: stage.outcomes,
-      token,
-    });
+    try {
+      return {
+        text: renderBrief(template, {
+          inputs: run.inputs,
+          runId: run.runId,
+          stages,
+          outcomes: stage.outcomes,
+          token,
+        }),
+      };
+    } catch (err) {
+      return {
+        refused: `brief ${stage.brief} cannot be rendered: ${errorMessage(err)}`,
+      };
+    }
   }
 
   private sessionKey(run: RunRow, stage: AgentStage): string {

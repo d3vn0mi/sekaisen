@@ -451,26 +451,29 @@ describe("the tick", () => {
     ]);
   });
 
-  it("a host stage run without a wake time is given one, not skipped forever", async () => {
-    const r = await flow(
-      { c: { type: "check", check: "demo.ready", outcomes: { yes: "done" } } },
-      (reg) => reg.checks.set("demo.ready", async () => "yes"),
-    );
+  it("a live stage run under an ended run is ended as orphaned", async () => {
+    const r = await flow({ w: { type: "wait", for: 10 * MIN, next: "done" } });
     const { runId } = await r.engine.startRun("flow", {});
-    // As a row written before stage runs had wake times.
-    const row = rows(r, runId)[0];
+    // The run ends without its live stage run (not something the engine does).
     r.store.tx((t) =>
-      t.updateStageRunIf(
-        row?.stageRunId ?? "",
-        { state: "submitted", attempt: 1 },
-        { wakeAt: null },
+      t.updateRunIf(
+        runId,
+        { status: "working", currentStage: "w" },
+        { status: "failed", endedAt: NOW },
       ),
     );
     await r.engine.tick();
-    await r.engine.tick();
-    expect(runOf(r, runId)).toMatchObject({
-      status: "completed",
-      currentStage: "done",
+    const row = rows(r, runId)[0];
+    expect(row).toMatchObject({ state: "canceled", wakeAt: null });
+    expect(
+      r.store.tx((t) =>
+        t.transitions(runId).find((x) => x.event === "orphaned_stage_run"),
+      ),
+    ).toMatchObject({
+      stageRunId: row?.stageRunId,
+      fromState: "submitted",
+      toState: "canceled",
+      detail: { run: "failed" },
     });
   });
 

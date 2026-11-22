@@ -19,3 +19,4 @@ stages:
       bad: { next: a }
       good: { next: done }
   done: { type: end, status: completed }
+  failed: { type: end, status: failed }

@@ -6,6 +6,7 @@ import { Engine } from "../../../src/engine/engine.js";
 import { hashToken } from "../../../src/engine/tokens.js";
 import type { LoadedDefinition } from "../../../src/format/load.js";
 import { createRegistry } from "../../../src/host/registry.js";
+import { openSqliteStore } from "../../../src/store/sqlite.js";
 import type { Store } from "../../../src/store/types.js";
 import {
   lastToken,
@@ -298,6 +299,51 @@ describe("dispatch", () => {
       event: "stage_rejected",
       toState: "failed",
     });
+  });
+
+  it("a store error while rendering the brief is not a rejection", async () => {
+    const store = openSqliteStore(":memory:");
+    let failing = false;
+    // A store whose reads of completed stages fail while `failing` is set.
+    const flaky: Store = {
+      close: () => store.close(),
+      tx: (fn) =>
+        store.tx((t) =>
+          fn(
+            new Proxy(t, {
+              get(target, prop) {
+                if (prop === "latestCompleted" && failing) {
+                  return () => {
+                    throw new Error("disk I/O error");
+                  };
+                }
+                const v = Reflect.get(target, prop, target);
+                return typeof v === "function" ? v.bind(target) : v;
+              },
+            }),
+          ),
+        ),
+    };
+    const { engine, adapter } = await make({ store: flaky });
+    const { runId } = await engine.startRun("review-loop", { topic: "a" });
+    failing = true;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await engine.tick();
+      expect(logged).toHaveBeenCalledWith("sekaisen: disk I/O error");
+    } finally {
+      logged.mockRestore();
+    }
+    failing = false;
+    expect(engine.status(runId).live).toMatchObject({
+      state: "submitted",
+      dispatchSeq: 0,
+    });
+    expect(engine.status(runId).run.status).toBe("working");
+    await engine.tick();
+    expect(adapter.calls.map((c) => c.idempotencyKey)).toEqual([
+      `${runId}:draft:1`,
+    ]);
   });
 
   it("a failed capabilities read is asked again on the next tick", async () => {

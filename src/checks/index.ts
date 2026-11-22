@@ -1,6 +1,7 @@
 import type { Capabilities } from "../adapter/types.js";
 import type { LoadedDefinition } from "../format/load.js";
 import type { HostRegistry } from "../host/registry.js";
+import { failureFindings } from "./failure.js";
 import { graphFindings } from "./graph.js";
 import { policyFindings } from "./policy.js";
 import { referenceFindings } from "./references.js";
@@ -16,6 +17,7 @@ export interface Finding {
     | "termination"
     | "policy"
     | "timing"
+    | "failure"
     | string;
   severity: "error" | "warning" | "info";
   stage?: string;
@@ -42,6 +44,7 @@ export async function runChecks(
     ...terminationFindings(loaded),
     ...policyFindings(loaded),
     ...timingFindings(loaded, opts.capabilities),
+    ...failureFindings(loaded),
   );
   for (const hostCheck of opts.registry.hostChecks) {
     findings.push(...(await hostCheck(loaded.def, loaded)));

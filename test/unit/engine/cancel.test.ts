@@ -61,7 +61,7 @@ describe("cancel", () => {
     const token = lastToken(r.adapter);
     const draft = r.engine.status(runId).live;
 
-    await r.engine.cancel(runId, "hud");
+    await r.engine.cancel(runId, "api");
     expect(r.adapter.aborted).toEqual(["fr_1"]);
     expect(
       r.store.tx((t) => t.getStageRun(draft?.stageRunId ?? "")),
@@ -71,14 +71,14 @@ describe("cancel", () => {
     expect(
       view.transitions.find((x) => x.event === "stage_canceled"),
     ).toMatchObject({
-      actor: "hud",
+      actor: "api",
       fromState: "working",
       toState: "canceled",
     });
     expect(
       view.transitions.find((x) => x.event === "run_canceled"),
     ).toMatchObject({
-      actor: "hud",
+      actor: "api",
       fromState: "working",
       toState: "canceled",
     });
@@ -110,10 +110,46 @@ describe("cancel", () => {
       status: "canceled",
       endedAt: 1_000_000,
     });
-    await expect(r.engine.cancel(runId, "hud")).rejects.toThrow(
+    await expect(r.engine.cancel(runId, "api")).rejects.toThrow(
       `run ${runId} already ended (canceled)`,
     );
     expect(keys).toHaveLength(1);
+  });
+
+  it("a cancel while the turn is being started aborts that turn", async () => {
+    const r = await cancellable((reg) =>
+      reg.actions.set("demo.undo", async () => {}),
+    );
+    const { runId } = await r.engine.startRun("review-loop", { topic: "x" });
+    r.adapter.beforeStart = async () => {
+      await r.engine.cancel(runId, "api");
+    };
+    await r.engine.tick();
+    const token = lastToken(r.adapter);
+
+    // The harness started fr_1 after the cancel committed: it is aborted.
+    expect(r.adapter.aborted).toEqual(["fr_1"]);
+    const draft = rows(r, runId).find((x) => x.stage === "draft");
+    expect(draft).toMatchObject({ state: "canceled", adapterRunId: null });
+    expect(r.engine.status(runId).run.status).toBe("canceled");
+    expect(events(r, runId)).toContain("turn_start_superseded");
+
+    const late = await r.engine.complete({
+      token,
+      outcome: "drafted",
+      fields: { pr_url: "u" },
+    });
+    expect(late).toEqual({
+      ok: false,
+      error: "this attempt has ended (canceled)",
+    });
+    const refused = r.store.tx((t) =>
+      t.transitions(runId).find((x) => x.event === "completion_refused"),
+    );
+    expect(refused).toMatchObject({
+      stageRunId: draft?.stageRunId,
+      detail: { reason: "attempt ended" },
+    });
   });
 
   it("a cancel action that throws is not retried", async () => {
@@ -154,16 +190,16 @@ describe("cancel", () => {
     const gate = r.engine.status(runId).live;
     expect(r.engine.status(runId).run.status).toBe("input_required");
 
-    await r.engine.cancel(runId, "telegram:42");
+    await r.engine.cancel(runId, "operator:a");
     expect(r.adapter.aborted).toEqual([]);
     expect(r.store.tx((t) => t.getGate(gate?.stageRunId ?? ""))).toMatchObject({
-      resolvedBy: "canceled:telegram:42",
+      resolvedBy: "canceled:operator:a",
       resolvedAt: 1_000_000,
     });
     expect(r.engine.status(runId).run).toMatchObject({ status: "canceled" });
     await expect(
-      r.engine.resolveGate(gate?.stageRunId ?? "", "approve", "hud"),
-    ).rejects.toThrow("gate already resolved by canceled:telegram:42");
+      r.engine.resolveGate(gate?.stageRunId ?? "", "approve", "api"),
+    ).rejects.toThrow("gate already resolved by canceled:operator:a");
   });
 
   it("a host call that returns after a cancel is dropped", async () => {

@@ -62,13 +62,16 @@ export const MIGRATIONS: readonly string[] = [
     dispatched_at   INTEGER,
     held_since      INTEGER,
     runtime_json    TEXT,
-    wait_reason     TEXT
+    wait_reason     TEXT,
+    wake_at         INTEGER
   );
   CREATE INDEX stage_runs_state ON stage_runs (state);
   CREATE INDEX stage_runs_token_hash ON stage_runs (token_hash);
   CREATE INDEX stage_runs_run ON stage_runs (run_id, stage);
   CREATE INDEX stage_runs_in_flight ON stage_runs (dispatched_at)
     WHERE dispatched_at IS NOT NULL;
+  CREATE INDEX stage_runs_wake ON stage_runs (wake_at)
+    WHERE wake_at IS NOT NULL;
 
   CREATE TABLE transitions (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,7 +95,10 @@ export const MIGRATIONS: readonly string[] = [
     resolved_by   TEXT,
     resolved_at   INTEGER,
     prompt        TEXT,
-    outcomes_json TEXT
+    outcomes_json TEXT,
+    poll_at       INTEGER,
+    poll_failures INTEGER NOT NULL DEFAULT 0,
+    poll_error    TEXT
   );
 
   CREATE TABLE limits (
@@ -103,15 +109,6 @@ export const MIGRATIONS: readonly string[] = [
     set_at       INTEGER NOT NULL,
     PRIMARY KEY (scope, key)
   );
-  `,
-  `
-  ALTER TABLE stage_runs ADD COLUMN wake_at INTEGER;
-  CREATE INDEX stage_runs_wake ON stage_runs (wake_at)
-    WHERE wake_at IS NOT NULL;
-
-  ALTER TABLE gates ADD COLUMN poll_at INTEGER;
-  ALTER TABLE gates ADD COLUMN poll_failures INTEGER NOT NULL DEFAULT 0;
-  ALTER TABLE gates ADD COLUMN poll_error TEXT;
   `,
 ];
 

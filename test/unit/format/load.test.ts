@@ -252,6 +252,54 @@ describe("loadDefinition", () => {
     expect(draft.retry).toEqual({ max: 1, on: ["lost"] });
   });
 
+  test("a retry without on retries the stage type's usual failures", async () => {
+    const file = await rewrite((y) =>
+      y
+        .replace("  retry: { max: 1, on: [no_result, lost] }\n", "")
+        .replace(
+          "    session: run\n    brief: briefs/draft.md\n",
+          "    session: run\n    brief: briefs/draft.md\n    retry: { max: 2 }\n",
+        )
+        .replace(
+          "  done: { type: end, status: completed }",
+          "  notify: { type: action, action: demo.notify, next: done, retry: { max: 2 } }\n  done: { type: end, status: completed }",
+        ),
+    );
+    const { def, problems } = await loadDefinition(file);
+    expect(problems).toEqual([]);
+    const retry = (id: string) =>
+      (def.stages[id] as { retry?: unknown } | undefined)?.retry;
+    expect(retry("draft")).toEqual({ max: 2, on: ["lost"] });
+    expect(retry("notify")).toEqual({
+      max: 2,
+      on: ["turn_error", "timeout"],
+    });
+  });
+
+  test("a default retry without on is filled in per stage type", async () => {
+    const file = await rewrite((y) =>
+      y
+        .replace(
+          "  retry: { max: 1, on: [no_result, lost] }\n",
+          "  retry: { max: 3 }\n",
+        )
+        .replace(
+          "  done: { type: end, status: completed }",
+          "  notify: { type: action, action: demo.notify, next: done }\n  done: { type: end, status: completed }",
+        ),
+    );
+    const { def, problems } = await loadDefinition(file);
+    expect(problems).toEqual([]);
+    const retry = (id: string) =>
+      (def.stages[id] as { retry?: unknown } | undefined)?.retry;
+    expect(retry("draft")).toEqual({ max: 3, on: ["lost"] });
+    expect(retry("notify")).toEqual({
+      max: 3,
+      on: ["turn_error", "timeout"],
+    });
+    expect(def.defaults?.retry).toEqual({ max: 3 });
+  });
+
   test("snake_case keys become camelCase", async () => {
     const file = await rewrite((y) =>
       y
