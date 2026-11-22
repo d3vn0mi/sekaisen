@@ -1,4 +1,5 @@
 import type { LoadedDefinition } from "../format/load.js";
+import type { Definition } from "../format/types.js";
 import { type GuardBound, guardBounds } from "../guard/bounds.js";
 import { GuardSyntaxError, parseGuard } from "../guard/parse.js";
 import { type Edge, edgesOf } from "./edges.js";
@@ -14,15 +15,43 @@ function boundsOf(e: Edge): GuardBound[] {
   }
 }
 
+/** The edges that follow an operator's answer; only these end a loop for certain. */
+function answered(def: Definition, e: Edge): boolean {
+  const s = def.stages[e.from];
+  return (
+    s?.type === "gate" &&
+    s.who === "operator" &&
+    s.poll === undefined &&
+    e.outcome in s.outcomes
+  );
+}
+
+/** True when `outcome` is one the stage declares, not a synthetic edge label. */
+function declared(def: Definition, stage: string, outcome: string): boolean {
+  const s = def.stages[stage];
+  return (
+    (s?.type === "agent" || s?.type === "gate" || s?.type === "check") &&
+    outcome in s.outcomes
+  );
+}
+
 /**
  * An edge breaks every cycle through it when a bound in its guard names a
- * stage or edge that each such cycle also passes, or when the bound says the
- * branch is never taken.
+ * counter that each such cycle also passes, or when the bound says the branch
+ * is never taken. `edges` has the operator-answered edges already removed.
  */
-function breaks(e: Edge, edges: Edge[]): boolean {
+function breaks(def: Definition, e: Edge, edges: Edge[]): boolean {
   const bounds = boundsOf(e);
   if (bounds.some((b) => b.max < 0)) return true;
   return bounds.some((b) => {
+    const kind = def.stages[b.stage]?.type;
+    if (
+      b.outcome !== undefined
+        ? !declared(def, b.stage, b.outcome)
+        : kind !== "agent" && kind !== "action"
+    ) {
+      return false;
+    }
     const onB = (x: Edge): boolean =>
       b.outcome !== undefined && x.from === b.stage && x.outcome === b.outcome;
     if (onB(e)) return true;
@@ -107,17 +136,16 @@ function cycleThrough(
 }
 
 /**
- * Every cycle must pass a gate or an edge whose guard bounds a count or
- * attempts term that lies on the cycle.
+ * Every cycle must pass an answered operator gate or an edge whose guard
+ * bounds a count or attempts term that lies on the cycle.
  */
 export function terminationFindings(loaded: LoadedDefinition): Finding[] {
   const { def } = loaded;
   const ids = Object.keys(def.stages);
-  const all = edgesOf(def).filter((e) => e.from !== "*" && e.to in def.stages);
-  const inGates = (n: string): boolean => def.stages[n]?.type === "gate";
-  const live = all.filter(
-    (e) => !inGates(e.from) && !inGates(e.to) && !breaks(e, all),
+  const open = edgesOf(def).filter(
+    (e) => e.from !== "*" && e.to in def.stages && !answered(def, e),
   );
+  const live = open.filter((e) => !breaks(def, e, open));
   const out: Finding[] = [];
   for (const comp of components(ids, live)) {
     const members = new Set(comp);

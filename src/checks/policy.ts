@@ -20,24 +20,28 @@ export function policyFindings(loaded: LoadedDefinition): Finding[] {
     },
   ];
   if (!(def.start in def.stages)) return out;
-  const adj = new Map<string, string[]>();
+  const adj = new Map<string, Array<{ to: string; outcome: string }>>();
   for (const e of edgesOf(def)) {
     if (e.from === "*" || !(e.to in def.stages)) continue;
-    adj.set(e.from, [...(adj.get(e.from) ?? []), e.to]);
+    adj.set(e.from, [...(adj.get(e.from) ?? []), e]);
   }
   const guarded = (id: string): boolean => {
     const s = def.stages[id];
     return s?.type === "gate" && s.who === "operator";
   };
-  // Walk only through stages that are not operator gates, remembering the way in.
-  const via = new Map<string, string | null>([[def.start, null]]);
-  const queue = [def.start];
+  // Walk from the start and the cancel target, remembering the way in. An
+  // operator gate lets only its timeout edge through: nobody answered there.
+  const roots = [def.start, def.onCancel].filter(
+    (s): s is string => s !== undefined && s in def.stages,
+  );
+  const via = new Map<string, string | null>(roots.map((r) => [r, null]));
+  const queue = [...roots];
   for (let n = queue.shift(); n !== undefined; n = queue.shift()) {
-    if (guarded(n)) continue;
-    for (const m of adj.get(n) ?? []) {
-      if (via.has(m)) continue;
-      via.set(m, n);
-      queue.push(m);
+    for (const e of adj.get(n) ?? []) {
+      if (guarded(n) && e.outcome !== "on_timeout") continue;
+      if (via.has(e.to)) continue;
+      via.set(e.to, n);
+      queue.push(e.to);
     }
   }
   for (const [id, stage] of Object.entries(def.stages)) {

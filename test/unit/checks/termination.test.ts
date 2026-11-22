@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { Finding } from "../../../src/checks/index.js";
-import type { Stage } from "../../../src/format/types.js";
+import type { AgentStage, Stage } from "../../../src/format/types.js";
 import { agent, end, loaded, run } from "./helpers.js";
 
 const term = (fs: Finding[]) => fs.filter((f) => f.check === "termination");
@@ -106,5 +106,71 @@ describe("termination", () => {
     expect(term(await run(l)).map((f) => f.message)).toEqual([
       "cycle a → a is unbounded",
     ]);
+  });
+
+  test("a bound on on_exhausted is not a bound", async () => {
+    const a = agent({ ok: { next: "z" } }) as AgentStage;
+    a.onExhausted = "b";
+    const l = loaded({
+      a,
+      b: agent({
+        ok: {
+          next: [{ if: "count(a.on_exhausted) < 3", to: "a" }, { to: "z" }],
+        },
+      }),
+      z: end(),
+    });
+    expect(term(await run(l)).map((f) => f.message)).toEqual([
+      "cycle a → b → a is unbounded",
+    ]);
+  });
+
+  test("a bound on a wait's next label is not a bound", async () => {
+    const l = loaded({
+      w: { type: "wait", for: 1000, next: "a" } as Stage,
+      a: agent({
+        ok: { next: [{ if: "count(w.next) < 3", to: "w" }, { to: "z" }] },
+      }),
+      z: end(),
+    });
+    expect(term(await run(l))).toHaveLength(1);
+  });
+
+  test("a bounded loop is not undone by a loop through a gate", async () => {
+    const l = loaded({
+      a: agent({ ok: { next: "b" }, alt: { next: "g" } }),
+      g: gate("b"),
+      b: agent({
+        again: { next: [{ if: "count(a.ok) < 3", to: "a" }, { to: "z" }] },
+      }),
+      z: end(),
+    });
+    expect(term(await run(l))).toEqual([]);
+  });
+
+  test("a loop through a gate's on_timeout is unbounded", async () => {
+    const g: Stage = {
+      type: "gate",
+      who: "operator",
+      timeout: 1000,
+      onTimeout: { next: "a" },
+      outcomes: { stop: { next: "z" } },
+    } as Stage;
+    const l = loaded({ a: agent({ ok: { next: "g" } }), g, z: end() });
+    expect(term(await run(l)).map((f) => f.message)).toEqual([
+      "cycle a → g → a is unbounded",
+    ]);
+  });
+
+  test("a loop through a poll gate is unbounded", async () => {
+    const g: Stage = {
+      type: "gate",
+      poll: { fact: "demo.ready", every: 1000 },
+      timeout: 1000,
+      onTimeout: { remind: 1000 },
+      outcomes: { retry: { next: "a" }, stop: { next: "z" } },
+    } as Stage;
+    const l = loaded({ a: agent({ ok: { next: "g" } }), g, z: end() });
+    expect(term(await run(l))).toHaveLength(1);
   });
 });

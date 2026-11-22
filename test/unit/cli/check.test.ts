@@ -75,4 +75,18 @@ describe("sekaisen check", () => {
     expect(r.code).toBe(0);
     expect(r.out).toContain("usage: sekaisen");
   });
+
+  test("a missing file is reported and the rest still run", async () => {
+    const r = await cli("check", "/nonexistent/p.yaml", GOOD);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("/nonexistent/p.yaml: error load ");
+    expect(r.out).toContain(`${GOOD}: info policy`);
+    expect(r.lines.at(-1)).toBe("check: 1 errors, 0 warnings");
+  });
+
+  test("check --help prints its usage and exits 0", async () => {
+    const r = await cli("check", "--help");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("sekaisen check <file...>");
+  });
 });

@@ -1,5 +1,6 @@
 import type { LoadedDefinition } from "../format/load.js";
 import {
+  type GuardAst,
   GuardSyntaxError,
   guardReferences,
   parseGuard,
@@ -7,6 +8,29 @@ import {
 import type { HostRegistry } from "../host/registry.js";
 import { edgesOf } from "./edges.js";
 import type { Finding } from "./index.js";
+
+type Counter =
+  | { kind: "count"; stage: string; outcome: string }
+  | { kind: "attempts"; stage: string };
+
+/** Every count and attempts term in a guard. */
+function counters(ast: GuardAst): Counter[] {
+  switch (ast.kind) {
+    case "count":
+      return [{ kind: "count", stage: ast.stage, outcome: ast.outcome }];
+    case "attempts":
+      return [{ kind: "attempts", stage: ast.stage }];
+    case "not":
+      return counters(ast.operand);
+    case "and":
+    case "or":
+      return ast.terms.flatMap(counters);
+    case "cmp":
+      return [...counters(ast.left), ...counters(ast.right)];
+    default:
+      return [];
+  }
+}
 
 const PLACEHOLDER = /\{\{\s*([^{}]*?)\s*\}\}/g;
 
@@ -87,7 +111,29 @@ export function referenceFindings(
     if (e.guard !== undefined) {
       const where = `stage ${e.from} outcome ${e.outcome} branch ${e.branch}`;
       try {
-        const refs = guardReferences(parseGuard(e.guard));
+        const ast = parseGuard(e.guard);
+        const refs = guardReferences(ast);
+        for (const t of counters(ast)) {
+          const st = def.stages[t.stage];
+          if (!st) continue;
+          if (t.kind === "count") {
+            const outs =
+              st.type === "agent" || st.type === "gate" || st.type === "check"
+                ? st.outcomes
+                : {};
+            if (!(t.outcome in outs)) {
+              err(
+                `${where}: guard counts undeclared outcome ${t.stage}.${t.outcome}`,
+                e.from,
+              );
+            }
+          } else if (st.type !== "agent" && st.type !== "action") {
+            err(
+              `${where}: guard attempts names stage ${t.stage}, which is not an agent or action stage`,
+              e.from,
+            );
+          }
+        }
         for (const s of refs.stages) {
           if (!exists(s))
             err(`${where}: guard names unknown stage ${s}`, e.from);

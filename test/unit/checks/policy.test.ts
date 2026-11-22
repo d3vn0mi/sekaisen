@@ -79,4 +79,28 @@ describe("policy", () => {
     l.def.providers = "subscription";
     expect(pol(await run(l))[0]?.message).toBe("providers: subscription");
   });
+
+  test("an operator gate's on_timeout edge is followed", async () => {
+    const g: Stage = {
+      type: "gate",
+      who: "operator",
+      timeout: 120_000,
+      onTimeout: { next: "p" },
+      outcomes: { yes: { next: "z" } },
+    } as Stage;
+    const l = loaded({ g, p: deployer("z"), z: end() });
+    expect(
+      pol(await run(l)).filter((f) => f.severity === "error"),
+    ).toHaveLength(1);
+  });
+
+  test("the onCancel target is a root", async () => {
+    const l = loaded(
+      { a: agent({ ok: { next: "z" } }), c: deployer("z"), z: end() },
+      { onCancel: "c" },
+    );
+    expect(
+      pol(await run(l)).filter((f) => f.severity === "error"),
+    ).toHaveLength(1);
+  });
 });

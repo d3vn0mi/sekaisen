@@ -266,3 +266,33 @@ describe("gate prompts", () => {
     expect(only(await run(l), "references")).toEqual([]);
   });
 });
+
+describe("guard counters", () => {
+  test("count of an undeclared outcome is an error", async () => {
+    const l = loaded({
+      a: agent({
+        ok: { next: [{ if: "count(a.nope) < 3", to: "a" }, { to: "z" }] },
+      }),
+      z: end(),
+    });
+    expect(only(await run(l), "references")).toContainEqual({
+      check: "references",
+      severity: "error",
+      stage: "a",
+      message:
+        "stage a outcome ok branch 0: guard counts undeclared outcome a.nope",
+    });
+  });
+
+  test("attempts of a stage that is not an agent or action is an error", async () => {
+    const l = loaded({
+      a: agent({
+        ok: { next: [{ if: "attempts(z) < 3", to: "a" }, { to: "z" }] },
+      }),
+      z: end(),
+    });
+    expect(only(await run(l), "references").map((f) => f.message)).toEqual([
+      "stage a outcome ok branch 0: guard attempts names stage z, which is not an agent or action stage",
+    ]);
+  });
+});

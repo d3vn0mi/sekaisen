@@ -10,19 +10,23 @@ export const CHECK_USAGE = "sekaisen check <file...> [--json]";
 export async function checkCommand(args: string[], io: Io): Promise<number> {
   let parsed: ReturnType<
     typeof parseArgs<{
-      options: { json: { type: "boolean" } };
+      options: { json: { type: "boolean" }; help: { type: "boolean" } };
       allowPositionals: true;
     }>
   >;
   try {
     parsed = parseArgs({
       args,
-      options: { json: { type: "boolean" } },
+      options: { json: { type: "boolean" }, help: { type: "boolean" } },
       allowPositionals: true,
     });
   } catch (x) {
     io.err(`${(x as Error).message}\nusage: ${CHECK_USAGE}\n`);
     return 2;
+  }
+  if (parsed.values.help) {
+    io.out(`usage: ${CHECK_USAGE}\n`);
+    return 0;
   }
   const files = parsed.positionals;
   if (files.length === 0) {
@@ -31,7 +35,18 @@ export async function checkCommand(args: string[], io: Io): Promise<number> {
   }
   const rows: Array<{ file: string } & Finding> = [];
   for (const file of files) {
-    const loaded = await loadDefinition(file);
+    let loaded: Awaited<ReturnType<typeof loadDefinition>>;
+    try {
+      loaded = await loadDefinition(file);
+    } catch (x) {
+      rows.push({
+        file,
+        check: "load",
+        severity: "error",
+        message: (x as Error).message,
+      });
+      continue;
+    }
     // Without a host the registered names are unknown, so they only warn.
     const findings = await runChecks(loaded, {
       registry: createRegistry(),
