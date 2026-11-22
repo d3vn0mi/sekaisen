@@ -416,8 +416,8 @@ read the same store.
 
 The format is the public contract, and `conformance/` pins it. Each case is a definition, its briefs,
 a script of outcomes and the expected transition log, one JSON object per line with no timestamps or
-random ids, then the final status. The cases are written by hand from the format's rules, never
-recorded from the engine. A runtime in any language is conformant if it reproduces every expected
+random ids, then the final status and the virtual time the run took. The cases are written by hand
+from the format's rules, never recorded from the engine. A runtime in any language is conformant if it reproduces every expected
 log. The TypeScript engine's test suite runs the whole suite.
 
 ## Room for later

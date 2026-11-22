@@ -8,4 +8,4 @@
 {"seq":8,"run_stage":"confirm","from":"submitted","to":"input_required","event":"gate_opened","actor":"engine"}
 {"seq":9,"run_stage":"confirm","from":"input_required","to":"failed","event":"gate_timeout","actor":"engine"}
 {"seq":10,"run_stage":"run","from":"working","to":"completed","event":"run_ended","actor":"engine"}
-{"status":"completed"}
+{"status":"completed","elapsed_ms":16200000}

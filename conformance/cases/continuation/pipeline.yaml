@@ -8,8 +8,8 @@ stages:
     type: agent
     agent: drafter
     brief: briefs/draft.md
-    deadline: 30m
-    turns: { max: 2 }
+    deadline: 20m
+    turns: { max: 3 }
     retry: { max: 1, on: [timeout] }
     outcomes:
       drafted: { fields: { summary: string }, next: done }

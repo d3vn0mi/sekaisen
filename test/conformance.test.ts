@@ -7,7 +7,8 @@ import { simulate } from "../src/simulate/simulate.js";
 
 /**
  * The conformance suite: each case's pipeline, run against its script,
- * must write exactly the lines of its expected.jsonl.
+ * must write exactly the lines of its expected.jsonl, the last of which is
+ * the run's final status and the virtual time it took.
  */
 
 const CASES = path.resolve("conformance/cases");
@@ -27,6 +28,7 @@ describe("conformance", () => {
   test("the suite has every case", () => {
     expect(cases).toEqual([
       "cancel",
+      "cancel-at-gate",
       "continuation",
       "fix-loop-cap",
       "gate-timeout",
@@ -48,7 +50,11 @@ describe("conformance", () => {
     const result = await simulate(loaded, script);
     expect(result.problems).toEqual([]);
 
-    const actual = [...result.log, { status: result.status }];
+    // The simulation stops when the run has ended, so its virtual time is the run's.
+    const actual = [
+      ...result.log,
+      { status: result.status, elapsed_ms: result.elapsedMs },
+    ];
     const expected = lines(
       readFileSync(path.join(dir, "expected.jsonl"), "utf8"),
     );

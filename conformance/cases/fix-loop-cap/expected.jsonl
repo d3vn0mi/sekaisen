@@ -15,4 +15,4 @@
 {"seq":15,"run_stage":"check","from":"submitted","to":"working","event":"turn_started","actor":"engine"}
 {"seq":16,"run_stage":"check","from":"working","to":"completed","event":"stage_completed","outcome":"fail","actor":"agent:checker"}
 {"seq":17,"run_stage":"run","from":"working","to":"failed","event":"run_ended","actor":"engine"}
-{"status":"failed"}
+{"status":"failed","elapsed_ms":0}

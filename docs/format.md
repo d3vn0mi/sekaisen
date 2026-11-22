@@ -52,7 +52,7 @@ unknown key, at any level, is an error.
 | `title` | no | string | A human title |
 | `inputs` | no | JSON Schema | What a run's inputs must satisfy. Without it, inputs must be a mapping (empty by default) |
 | `defaults` | no | mapping | `deadline`, `retry` and `priority` for the stages and runs that give none, below |
-| `providers` | no | `fleet`, `subscription` or `{ allow: [string] }` | Which providers the pipeline's turns may run on; `fleet` by default. See [usage limits](#usage-limits-and-provider-policy) |
+| `providers` | no | `fleet`, `subscription` or `{ allow: [string, …] }` (at least one) | Which providers the pipeline's turns may run on; `fleet` by default. See [usage limits](#usage-limits-and-provider-policy) |
 | `start` | yes | stage id | The stage a run enters first |
 | `stages` | yes | mapping of stage id to stage | The stages |
 | `on_cancel` | no | stage id of an `action` stage | An action run once when the run is canceled. See [cancellation](#cancellation) |
@@ -155,8 +155,7 @@ Waits for a duration or until an instant.
 | `until` | one of `for`, `until` | string with placeholders | Renders to an ISO 8601 date and time with a UTC offset, such as `2026-03-01T09:00:00Z` |
 | `next` | yes | stage id | Where the stage goes once the wait is over |
 
-When both are given, `for` wins. A wait with neither fails when it starts, as
-`wait_invalid_until`.
+A wait has exactly one of `for` and `until`; the checker refuses one with neither or both.
 
 ### end
 
@@ -437,8 +436,13 @@ The moves a stage run can make:
 `completed`, `failed`, `canceled` and `rejected` are final.
 
 A run's status is `working`, `input_required`, `completed`, `failed` or `canceled`. A run is
-`input_required` exactly while an operator gate of it is open, and `working` otherwise until it
-ends. That switch writes no transition: it can be read from the stage run's state.
+`input_required` while an operator gate of it is open, and `working` otherwise until it ends. The
+switch between the two writes no transition: it happens in the same transaction as the gate's own
+transition, and can be read from it.
+
+A run transition's `from` is the run's status at the moment of the change. A cancellation moves
+the live stage run first and the run in the same transaction, so a run canceled while an operator
+gate is open goes from `input_required` straight to `canceled`, with no `working` in between.
 
 ## Endings, retries and exhaustion
 
@@ -461,10 +465,11 @@ visit has retries left (`retry.max` counts retries per visit, not attempts), a n
 same visit starts: a new stage run, a new token, a fresh deadline and a new idempotency key. An
 agent-declared outcome never retries; it follows its `next`.
 
-Otherwise the stage is exhausted and takes its `on_exhausted` edge, or the first `end` stage with
-`status: failed`. So a pipeline in which any stage can fail needs a `failed` end, or an
-`on_exhausted` on each stage that can fail; the checker requires it. These stages can fail: every
-agent, check and action stage, and a wait with `until`.
+Otherwise the stage is exhausted. An agent or action stage takes its `on_exhausted` edge when it
+names one; every other stage that can fail, and an agent or action stage without `on_exhausted`,
+goes to the first `end` stage with `status: failed`. These stages can fail: every agent, check and
+action stage, and a wait with `until`. So a pipeline with a check, a wait with `until`, or an agent
+or action stage without `on_exhausted` needs a `failed` end; the checker requires it.
 
 A check never retries: one that throws ends `turn_error` (or `timeout`), and one that returns an
 outcome it does not declare ends with `check_invalid_outcome`, both straight to exhaustion. A wait
@@ -543,7 +548,8 @@ A run that has not ended can be canceled, with who canceled it. In one transacti
 
 1. The live stage run moves to `canceled`. A turn in flight is to be aborted, where the harness
    can, and an open gate is closed as resolved by `canceled:<who>`.
-2. The run moves to `canceled`.
+2. The run moves to `canceled`, from the status it had (`input_required` when an operator gate was
+   open).
 3. When `on_cancel` names an action stage, one stage run of it is submitted. It runs once, under
    the idempotency key `<run id>:cancel`, never retries and never moves the run on; its result is
    logged as `cancel_action_completed` or `cancel_action_failed`. When `on_cancel` names a stage
@@ -574,29 +580,32 @@ runs take a lane or count toward the work limit.
 - **A refused turn.** Its error contains a line matching
   `You've hit your (session |usage |weekly )?limit[^\n]*`. Every provider the harness would have
   fallen back to has failed.
-- **A degraded turn.** Under `subscription` or `allow`, a turn the harness reports as having run on
-  a provider outside the pipeline's allowed set.
+- **A degraded turn.** Under `subscription` or `allow`, a turn that ended normally (not with an
+  error) and that the harness reports as having run on a provider outside the pipeline's allowed
+  set. A turn whose provider the harness does not report is never degraded, and neither is a turn
+  that ended with an error (it is judged as a refusal or a `turn_error`).
 
 ### Provider policy
 
 | `providers` | Allowed providers | Degraded turns |
 |---|---|---|
 | `fleet` (default) | any | never; only a refused turn pauses |
-| `subscription` | the harness's subscription provider | a turn on any other provider |
+| `subscription` | the harness's subscription provider | a turn on any other provider; when the harness reports no subscription provider, nothing is degraded |
 | `{ allow: [p, …] }` | the listed providers | a turn on any other provider |
 
 ### Pauses
 
 | Scope | Written by | Holds |
 |---|---|---|
-| `provider:<p>` | a refused turn on provider `p`: the provider the turn reports, else the harness's subscription provider, else `default` | every `fleet` pipeline (a refusal means the whole fallback chain failed), and every `subscription` or `allow` pipeline whose allowed set contains `p` |
+| `provider:<p>` | a refused turn on provider `p`: the provider the turn reports, else the harness's subscription provider, else `default` | the refused attempt itself, whatever its pipeline's policy; every `fleet` pipeline (a refusal means the whole fallback chain failed); and every `subscription` or `allow` pipeline whose allowed set contains `p` |
 | `policy:<key>` | a degraded turn; `<key>` is the allowed set, sorted, without duplicates, comma-joined | the `subscription` and `allow` pipelines with that allowed set |
 
 A pause holds only the dispatch of agent turns. A refused turn's attempt goes back to `submitted`
 (`usage_limited`) without costing a retry or a turn, and is dispatched again once the pause is
-over. A degraded turn that completed is accepted and pauses the policy for an hour. A degraded turn
-that ended without completing is `usage_limited`; with a fresh checkpoint it keeps its turn count
-and continues from the note when the pause is over.
+over. A degraded turn that completed is accepted and pauses the policy for one hour. A degraded
+turn that ended without completing is `usage_limited` and pauses the policy for one hour; without a
+fresh checkpoint it is not counted and its deadline starts again, as for a refused turn; with one,
+and turns and time left, it keeps its turn count and continues from the note when the pause is over.
 
 A pause is never shortened: a new pause on the same scope keeps the later end.
 
@@ -607,12 +616,16 @@ A refusal's pause lasts until the time in its `resets <when>` phrase:
 | Form | Example | Read as |
 |---|---|---|
 | An ISO 8601 instant with a zone | `resets 2026-11-22T18:00:00Z` | That instant |
-| A time of day | `resets 7pm`, `resets 7:30pm (Europe/Berlin)` | Its next occurrence |
-| A date and a time | `resets Nov 1, 7pm (Europe/Berlin)` | The nearest such date |
+| A time of day | `resets 7pm`, `resets 9:30am (America/Chicago)` | Its last occurrence when that was within the past hour, else its next one |
+| A date and a time | `resets Mar 3, 9am (America/Chicago)` | That date in the year that puts it nearest to now |
 
-A time zone may follow in parentheses; UTC without one. A reset that passed within the last hour
-is taking effect now: the pause lasts five minutes. Anything that cannot be read, a reset further
-in the past, or a refusal with no reset phrase, pauses for one hour.
+Times are on the 12-hour clock with `am` or `pm` (any case), minutes optional. Months are English
+names, read by their first three letters (`Mar`, `March`). A time zone is an IANA zone name in
+parentheses (`America/Chicago`); UTC without one.
+
+A reset that is not in the future but passed at most an hour ago is taking effect now: the pause
+lasts five minutes. Anything that cannot be read (an unknown zone among them), a reset more than an
+hour in the past, or a refusal with no reset phrase, pauses for one hour.
 
 ## Checks before a run
 
@@ -621,13 +634,13 @@ finding is an error, a warning or information.
 
 | Check | Verifies |
 |---|---|
-| Schema | The file is YAML and matches the format's JSON Schema; durations parse; field shorthand and schemas are valid; stage ids and outcome names are not [reserved](#reserved-names); a gate has exactly one of `who: operator` and `poll`, and a poll gate exactly one outcome; no reserved stage type |
+| Schema | The file is YAML and matches the format's JSON Schema; durations parse; field shorthand and schemas are valid; stage ids and outcome names are not [reserved](#reserved-names); a gate has exactly one of `who: operator` and `poll`, and a poll gate exactly one outcome; a wait has exactly one of `for` and `until`; an `allow` list names at least one provider; no reserved stage type |
 | References | `start`, `on_cancel` and every `next`, `on_exhausted` and `on_timeout` target exist; every guard parses, names existing stages, counts only declared outcomes and takes `attempts` only of agent or action stages; every check, action and fact is registered by the host; every brief exists; every placeholder names `inputs.<x>`, `run.id`, `stage.outcomes` or a field of an existing stage (a warning when that stage is not on every path to the one that reads it) |
 | Graph | Every stage is reachable from `start` (or from `on_cancel`); an end is reachable from every stage; every agent and gate stage has an outcome; every outcome has a `next`; the last branch has no guard. A stage that can fail counts as leading to its `on_exhausted` or the first `failed` end |
 | Termination | Every cycle in the graph is broken by an answered operator gate (one of its declared outcomes; a timeout edge does not count), or by an edge whose guard bounds a `count` or `attempts` term against an integer literal, where every way round the cycle passes what the term counts. Only bounds in the guard's top-level `and` count; under `or` or `not` a term bounds nothing |
 | Policy | Reports the provider policy. A stage with `deploys: true` cannot be reached from `start` or `on_cancel` without passing an operator gate's answered outcome |
 | Timing | An agent stage's `turns.cap` is at most the harness's turn cap (when the harness's capabilities are known); its deadline is at least `turns.max` × 60 seconds; a gate's `remind` is at least 60 seconds and at most its `timeout` |
-| Failure | A stage that can fail has an `on_exhausted` or the pipeline has a `failed` end (an error); a `retry` with `max` above 0 and an empty `on` (a warning) |
+| Failure | A stage that can fail has somewhere to go when it is exhausted: its `on_exhausted` (agent and action stages only) or the pipeline's `failed` end (an error otherwise); a `retry` with `max` above 0 and an empty `on` (a warning) |
 
 ## The transition log
 
@@ -654,7 +667,9 @@ line, keys in this order:
 | `actor` | Who made the change |
 
 Times and ids are left out, so that the same definition and the same script always give the same
-log.
+log. The conformance suite ends each log with one more line, the run's final status and the
+virtual time it took, in milliseconds from the run's start to its end:
+`{"status":"completed","elapsed_ms":4020000}`.
 
 ### Actors
 

@@ -1,5 +1,7 @@
+# Every turn is shorter than the scripted harness's 10-minute turn cap.
 stages:
   draft:
-    - { progress: "Outline done; the body is next.", after: 20m }
-    - { outcome: drafted, fields: { summary: Too late. }, after: 15m }
+    - { progress: "Outline done; the body is next.", after: 8m }
+    - { progress: "Body half done.", after: 8m }
+    - { outcome: drafted, fields: { summary: Too late. }, after: 8m }
     - { outcome: drafted, fields: { summary: A short draft. }, after: 5m }

@@ -39,9 +39,9 @@ engine. There is no visual editor, and stages cannot run in parallel yet.
 [Security](#security)
 
 > [!IMPORTANT]
-> **Nothing to install yet.** There is no npm package and no code in this repository so far. The
-> format, the commands and the interfaces below are **planned for 0.1**, and may change before it
-> ships. Watch the repository to follow the first release.
+> **Nothing to install yet.** The engine is being built on a branch, and nothing is published yet:
+> there is no npm package. The format, the commands and the interfaces below are **planned for
+> 0.1**, and may change before it ships. Watch the repository to follow the first release.
 
 ## How it works
 
@@ -87,7 +87,9 @@ stages:
     who: operator
     prompt: "Publish the release notes for {{inputs.tag}}?"
     timeout: 24h
-    outcomes: { approve: publish, reject: failed }
+    outcomes:
+      approve: { next: publish }
+      reject: { next: failed }
   publish:
     type: agent
     agent: publisher

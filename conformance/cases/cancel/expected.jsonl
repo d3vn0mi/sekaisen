@@ -11,4 +11,4 @@
 {"seq":11,"run_stage":"cleanup","from":null,"to":"submitted","event":"stage_submitted","actor":"simulator"}
 {"seq":12,"run_stage":"publish","from":"canceled","to":"canceled","event":"abort_settled","actor":"engine"}
 {"seq":13,"run_stage":"cleanup","from":"submitted","to":"completed","event":"cancel_action_completed","actor":"engine"}
-{"status":"canceled"}
+{"status":"canceled","elapsed_ms":600000}

@@ -168,6 +168,53 @@ describe("loadDefinition", () => {
     );
   });
 
+  test("a wait has either for or until: neither is a problem", async () => {
+    const file = await rewrite((y) =>
+      y.replace(
+        "  done: { type: end",
+        "  pause: { type: wait, next: done }\n  done: { type: end",
+      ),
+    );
+    expect((await loadDefinition(file)).problems).toContain(
+      "stage pause: a wait has either for or until",
+    );
+  });
+
+  test("a wait has either for or until: both is a problem", async () => {
+    const file = await rewrite((y) =>
+      y.replace(
+        "  done: { type: end",
+        '  pause: { type: wait, for: 1h, until: "2026-03-01T09:00:00Z", next: done }\n  done: { type: end',
+      ),
+    );
+    expect((await loadDefinition(file)).problems).toContain(
+      "stage pause: a wait has either for or until",
+    );
+  });
+
+  test("a wait with one of for or until loads", async () => {
+    const file = await rewrite((y) =>
+      y.replace(
+        "  done: { type: end",
+        "  pause: { type: wait, for: 1h, next: done }\n  done: { type: end",
+      ),
+    );
+    expect((await loadDefinition(file)).problems).toEqual([]);
+  });
+
+  test("an allow list of providers names at least one", async () => {
+    const empty = await rewrite((y) =>
+      y.replace("start: draft", "providers: { allow: [] }\nstart: draft"),
+    );
+    expect((await loadDefinition(empty)).problems).toEqual([
+      expect.stringMatching(/providers/),
+    ]);
+    const one = await rewrite((y) =>
+      y.replace("providers: { allow: [] }", "providers: { allow: [demo] }"),
+    );
+    expect((await loadDefinition(one)).problems).toEqual([]);
+  });
+
   test("a poll gate declares exactly one outcome", async () => {
     const file = await rewrite((y) =>
       y.replace(

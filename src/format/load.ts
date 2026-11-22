@@ -291,7 +291,7 @@ const RESERVED_STAGE_IDS = ["run", "stage", "inputs"];
 
 const RESERVED_OUTCOMES = ["on_timeout", "on_exhausted", "on_cancel", "next"];
 
-/** Rules the schema cannot say: reserved outcome names and gate kinds. */
+/** Rules the schema cannot say: reserved outcome names, gate kinds and wait kinds. */
 function stageRules(id: string, stage: Raw): string[] {
   const out: string[] = [];
   if (isObject(stage.outcomes)) {
@@ -318,6 +318,12 @@ function stageRules(id: string, stage: Raw): string[] {
     ) {
       out.push(`stage ${id}: a poll gate declares exactly one outcome`);
     }
+  }
+  if (
+    stage.type === "wait" &&
+    (stage.for === undefined) === (stage.until === undefined)
+  ) {
+    out.push(`stage ${id}: a wait has either for or until`);
   }
   return out;
 }

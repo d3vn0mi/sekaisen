@@ -15,4 +15,4 @@
 {"seq":15,"run_stage":"publish","from":"completed","to":"completed","event":"turn_ended","actor":"engine"}
 {"seq":16,"run_stage":"notify","from":"submitted","to":"completed","event":"stage_completed","actor":"action:demo.notify"}
 {"seq":17,"run_stage":"run","from":"working","to":"completed","event":"run_ended","actor":"engine"}
-{"status":"completed"}
+{"status":"completed","elapsed_ms":4020000}

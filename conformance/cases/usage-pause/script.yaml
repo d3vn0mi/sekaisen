@@ -1,5 +1,9 @@
 stages:
   draft:
-    - { ending: usage_limited, after: 10m, resets: 30m }
+    # Refused; the reset it names is 30 minutes later.
+    - { ending: usage_limited, after: 5m, resets: 30m }
+    # Refused with no reset: a pause of one hour.
     - { ending: usage_limited, after: 1m }
+    # Refused with a reset that has just passed: a pause of five minutes.
+    - { ending: usage_limited, after: 1m, resets: 0s }
     - { outcome: drafted, after: 5m }

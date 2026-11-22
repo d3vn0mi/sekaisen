@@ -13,4 +13,4 @@
 {"seq":13,"run_stage":"check","from":"submitted","to":"working","event":"turn_started","actor":"engine"}
 {"seq":14,"run_stage":"check","from":"working","to":"failed","event":"turn_error","actor":"engine"}
 {"seq":15,"run_stage":"run","from":"working","to":"failed","event":"run_ended","actor":"engine"}
-{"status":"failed"}
+{"status":"failed","elapsed_ms":720000}

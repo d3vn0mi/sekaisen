@@ -5,6 +5,8 @@
 {"seq":5,"run_stage":"draft","from":"submitted","to":"working","event":"turn_started","actor":"engine"}
 {"seq":6,"run_stage":"draft","from":"working","to":"submitted","event":"usage_limited","actor":"engine"}
 {"seq":7,"run_stage":"draft","from":"submitted","to":"working","event":"turn_started","actor":"engine"}
-{"seq":8,"run_stage":"draft","from":"working","to":"completed","event":"stage_completed","outcome":"drafted","actor":"agent:drafter"}
-{"seq":9,"run_stage":"run","from":"working","to":"completed","event":"run_ended","actor":"engine"}
-{"status":"completed"}
+{"seq":8,"run_stage":"draft","from":"working","to":"submitted","event":"usage_limited","actor":"engine"}
+{"seq":9,"run_stage":"draft","from":"submitted","to":"working","event":"turn_started","actor":"engine"}
+{"seq":10,"run_stage":"draft","from":"working","to":"completed","event":"stage_completed","outcome":"drafted","actor":"agent:drafter"}
+{"seq":11,"run_stage":"run","from":"working","to":"completed","event":"run_ended","actor":"engine"}
+{"status":"completed","elapsed_ms":6420000}

@@ -1,0 +1,22 @@
+format: 1
+id: cancel-at-gate
+title: A run canceled while an operator gate is open
+version: 1
+start: draft
+stages:
+  draft:
+    type: agent
+    agent: drafter
+    brief: briefs/draft.md
+    outcomes:
+      drafted: { next: review }
+  review:
+    type: gate
+    who: operator
+    prompt: Publish the draft?
+    timeout: 24h
+    outcomes:
+      approve: { next: done }
+      reject: { next: failed }
+  done: { type: end, status: completed }
+  failed: { type: end, status: failed }

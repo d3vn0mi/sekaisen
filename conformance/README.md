@@ -16,17 +16,20 @@ described below writes exactly the lines of `expected.jsonl`.**
 
 - In: `pipeline.yaml` (format 1, with its `briefs/`) and `script.yaml`, both YAML.
 - Out: the run's transition log as JSON Lines, one object per transition, in log order, then one
-  last line with the run's final status: `{"status":"completed"}`.
+  last line with the run's final status and the virtual time from the run's start to its end, in
+  milliseconds: `{"status":"completed","elapsed_ms":4020000}`. Log lines carry no times, so this
+  line is what pins timing: a pause that ends too early, or a gate that times out late, changes
+  it.
 
 Each transition line has the keys `seq`, `run_stage`, `from`, `to`, `event`, `outcome` and `actor`,
 in that order, with `outcome` present only on the transitions that take one. The
 [format reference](../docs/format.md#the-transition-log) defines each key, every event name and
-the order the events come in. **The event names and the line shape are part of the contract**: a
-runtime that writes `stage_done` for `stage_completed`, or puts `outcome: null` on a line without
-one, is not conformant.
+the order the events come in. **The event names and the line shape, key order included, are part of
+the contract**: a runtime that writes `stage_done` for `stage_completed`, puts `outcome: null` on a
+line without one, or writes `actor` before `event`, is not conformant.
 
-Lines are compared as JSON values, key by key: whitespace between tokens does not matter, but key
-names, values and the order of the lines do.
+Lines are compared as JSON objects: whitespace between tokens does not matter, but key names, key
+order, values and the order of the lines do.
 
 ## Cases
 
@@ -36,13 +39,14 @@ names, values and the order of the lines do.
 | [`fix-loop-cap`](cases/fix-loop-cap) | A draft and check loop bounded by `count(check.fail) < 2`, where `count` includes the outcome being taken, ending at the `failed` end |
 | [`gate-timeout`](cases/gate-timeout) | Gate reminders (the first at the timeout, then every `remind`), a resolution after them, and a gate whose `on_timeout` edge is taken |
 | [`lost-retry`](cases/lost-retry) | A turn lost to a restart and retried by the default agent retry, then retries on `no_result` that run out and exhaust to the first `failed` end |
-| [`usage-pause`](cases/usage-pause) | A refused turn pausing until its reset, a refusal without a reset pausing for an hour, then the attempt completing |
+| [`usage-pause`](cases/usage-pause) | Refused turns pausing until the reset they name, for an hour when they name none, and for five minutes when the reset has just passed, then the attempt completing |
 | [`cancel`](cases/cancel) | A cancel while a turn is in flight: the abort, the run's `canceled` status and the `on_cancel` action running once |
-| [`continuation`](cases/continuation) | A checkpoint and a continuation turn sharing the attempt's deadline, the timeout of that turn, and a retry with a fresh deadline |
+| [`cancel-at-gate`](cases/cancel-at-gate) | A cancel while an operator gate is open: the run goes from `input_required` straight to `canceled` |
+| [`continuation`](cases/continuation) | Two checkpoints and continuation turns sharing the attempt's deadline, the timeout of the third turn, and a retry with a fresh deadline |
 | [`poll-gate`](cases/poll-gate) | An action that fails once and is retried, then a poll gate that passes on its third poll |
 
-Each case folder holds `pipeline.yaml`, `briefs/` (the brief templates its agent stages name),
-`script.yaml` and `expected.jsonl`.
+Each case folder holds `pipeline.yaml`, `briefs/` (the brief templates its agent stages name, when
+it has agent stages), `script.yaml` and `expected.jsonl`.
 
 ## Running a case
 
@@ -85,23 +89,29 @@ visit, attempt and continuation, in order. An entry takes effect `after` (a [dur
 | `progress: <note>` | Calls `stage_progress` with that note, then ends normally without completing |
 | `ending: no_result` | Ends normally without calling anything |
 | `ending: turn_error` | Ends with the error `the simulated turn failed` |
-| `ending: usage_limited` | Ends with the error `You've hit your usage limit`, followed, when `resets` is given, by ` · resets <instant>`, the turn's end plus `resets`, as an ISO 8601 UTC instant with milliseconds (`2026-01-01T00:40:00.000Z`) |
+| `ending: usage_limited` | Ends with the error `You've hit your usage limit`, followed, when `resets` is given, by ` · resets <instant>`, the turn's end plus `resets`, as an ISO 8601 UTC instant with milliseconds (`2026-01-01T00:40:00.000Z`). `resets: 0s` names the turn's end itself, a reset that has just passed |
 | `ending: lost` | The harness forgets the turn and the engine restarts at once; the new engine settles what was in flight before anything else happens |
 | `ending: timeout` | Never ends; the attempt's deadline decides |
 
 An operator gate's entries are used one per opening: `resolve: <outcome>` answers it with that
 outcome `after` it opened, with the actor `simulator`; `ending: timeout` never answers it.
 
-Once a stage's list runs out, a turn completes with the stage's first outcome and the smallest
-fields its schema accepts, and a gate is resolved with its first outcome, both at once. A check
-whose list ran out returns its stage's first outcome, an action succeeds and a fact holds.
+Once a stage's list runs out, a turn completes with the stage's first outcome and any fields
+valid for that outcome, and a gate is resolved with its first outcome, both at once. A check whose
+list ran out returns its stage's first outcome, an action succeeds and a fact holds.
+
+A fact can only be scripted to hold or not: a fact that throws, and so `poll_error` and the poll
+backoff, cannot be scripted yet. Nor can a turn whose provider is reported, so a degraded turn
+cannot either.
 
 ### The procedure
 
 1. **Start.** The virtual clock starts at `2026-01-01T00:00:00Z`. The run is started with the
    script's inputs and the actor `simulator`. The harness reports a turn cap of 10 minutes, 8
    concurrent turns, that it can abort turns, and no subscription provider, and the engine's other
-   settings are their defaults.
+   settings are their defaults. The turn cap is reported only for the Timing check: the scripted
+   harness never ends a turn at its cap. Every case keeps its turns shorter than the cap, so a
+   harness that does end them passes too.
 2. **Step.** Repeat:
    1. If the script's cancel is due (the clock has reached the start plus `after`) and the run has
       not ended, cancel the run with the actor `simulator`. A cancel comes before anything else due

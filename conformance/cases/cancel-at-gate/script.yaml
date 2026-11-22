@@ -1,0 +1,6 @@
+stages:
+  draft:
+    - { outcome: drafted, after: 5m }
+  review:
+    - { resolve: approve, after: 1h }
+cancel: { after: 30m }
