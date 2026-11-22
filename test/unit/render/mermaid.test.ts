@@ -43,15 +43,42 @@ describe("renderMermaid", () => {
     expect(out).toContain("  class s_check current\n");
   });
 
-  test("taken edges are styled by index and tint their states", async () => {
+  test("taken edges are marked in the label and tint their states", async () => {
     const out = renderMermaid(await def(), {
       current: "check",
       taken: new Set(["draft.drafted", "check.fail[0]"]),
     });
-    expect(out).toContain("  linkStyle 1 stroke:#047857,stroke-width:2px\n");
-    expect(out).toContain("  linkStyle 4 stroke:#047857,stroke-width:2px\n");
+    expect(out).not.toContain("linkStyle");
+    expect(out).toContain("  s_draft --> s_check : ✓ drafted\n");
+    expect(out).toContain(
+      "  s_check --> s_draft : ✓ fail [count(check.fail) < 3]\n",
+    );
+    expect(out).toContain("  s_draft --> s_failed : blocked\n");
     expect(out).toContain("  class s_draft taken\n");
     expect(out).toContain("  class s_check current\n");
+  });
+
+  test("a taken edge without a label is marked alone", async () => {
+    const d = structuredClone(await def()) as Definition;
+    d.stages.draft = {
+      type: "wait",
+      for: 1000,
+      next: "check",
+    };
+    const out = renderMermaid(d, { taken: new Set(["draft.next"]) });
+    expect(out).toContain("  s_draft --> s_check : ✓\n");
+  });
+
+  test("semicolons in a guard stay inside the label", async () => {
+    const d = structuredClone(await def()) as Definition;
+    const check = d.stages.check;
+    if (check?.type !== "agent") throw new Error("fixture changed");
+    check.outcomes.fail = {
+      next: [{ if: "x;y z", to: "draft" }, { to: "failed" }],
+    };
+    expect(renderMermaid(d)).toContain(
+      "  s_check --> s_draft : fail [x#59;y z]\n",
+    );
   });
 
   test("long guards are truncated and quotes escaped", async () => {
@@ -67,7 +94,12 @@ describe("renderMermaid", () => {
     const out = renderMermaid(d);
     expect(out).toMatch(/fail \[x == #quot;y+…\]/);
     expect(out).not.toContain("y".repeat(61));
-    expect(out).toContain("s_a_b_2");
+    const lines = out.split("\n");
+    const one = lines.find((l) => l.endsWith(" as s_a_b"));
+    const two = lines.find((l) => l.endsWith(" as s_a_b_2"));
+    expect(one).toBeDefined();
+    expect(two).toBeDefined();
+    expect(one).not.toBe(two);
     expect(out).toContain("cancel --> s_failed : on_cancel");
   });
 });

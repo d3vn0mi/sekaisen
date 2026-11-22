@@ -11,7 +11,10 @@ export interface RenderOptions {
 const GUARD_MAX = 60;
 
 function quote(text: string): string {
-  return text.replace(/\s+/g, " ").replace(/"/g, "#quot;");
+  return text
+    .replace(/\s+/g, " ")
+    .replace(/;/g, "#59;")
+    .replace(/"/g, "#quot;");
 }
 
 function guardText(guard: string): string {
@@ -41,8 +44,9 @@ function stateIds(ids: string[]): Map<string, string> {
 /**
  * A `stateDiagram-v2` of the definition: one state per stage, one transition
  * per declared edge in definition order, end stages linked to `[*]`.
- * Mermaid cannot style a transition by class, so followed transitions are
- * coloured with `linkStyle` and the states they touch get the `taken` class.
+ * Mermaid cannot style a transition by class, so a followed transition gets a
+ * `✓ ` label prefix and the states it touches get the `taken` class. The
+ * `--> [*]` links of end stages have no edge id and are never marked.
  */
 export function renderMermaid(
   def: Definition,
@@ -58,11 +62,10 @@ export function renderMermaid(
   if (def.onCancel) lines.push('  state "cancel" as cancel');
 
   const links: string[] = [];
-  const followed: number[] = [];
   const touched = new Set<string>();
   const link = (from: string, to: string, label: string, isTaken: boolean) => {
-    if (isTaken) followed.push(links.length);
-    links.push(`  ${from} --> ${to}${label ? ` : ${quote(label)}` : ""}`);
+    const text = isTaken ? `✓ ${label}`.trimEnd() : label;
+    links.push(`  ${from} --> ${to}${text ? ` : ${quote(text)}` : ""}`);
   };
 
   link("[*]", sid(def.start), "", false);
@@ -84,9 +87,6 @@ export function renderMermaid(
 
   lines.push("  classDef current fill:#fde68a,stroke:#b45309,stroke-width:2px");
   lines.push("  classDef taken fill:#d1fae5,stroke:#047857");
-  for (const n of followed) {
-    lines.push(`  linkStyle ${n} stroke:#047857,stroke-width:2px`);
-  }
   const marked = [...touched].filter(
     (id) => id !== opts.current && ids.has(id),
   );
