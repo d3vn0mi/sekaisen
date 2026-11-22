@@ -35,12 +35,13 @@ engine. There is no visual editor, and stages cannot run in parallel yet.
 [Roadmap](#roadmap) ·
 [Non-goals](#non-goals) ·
 [Design](docs/design.md) ·
+[Adapters](docs/adapter.md) ·
 [Contributing](#contributing) ·
 [Security](#security)
 
 > [!IMPORTANT]
-> **Nothing to install yet.** The engine is being built on a branch, and nothing is published yet:
-> there is no npm package. The format, the commands and the interfaces below are **planned for
+> **Nothing to install yet.** The core engine and its CLI are built, but nothing is published yet: there is no npm
+> package. The format, the commands and the interfaces below are **planned for
 > 0.1**, and may change before it ships. Watch the repository to follow the first release.
 
 ## How it works
@@ -106,7 +107,7 @@ stages:
   failed: { type: end, status: failed }
 ```
 
-As a state diagram (`sekaisen render` will draw one like it):
+As a state diagram (`sekaisen render` draws one like it):
 
 ```mermaid
 stateDiagram-v2
@@ -204,9 +205,9 @@ The road to 0.1:
       to walk every path up to a bound. `sekaisen simulate`.
 - [x] **Conformance suite.** Definitions, scripts and expected transition logs, in a language-neutral
       form.
-- [ ] **MCP completion server.** `stage_complete` and `stage_progress` for harnesses that speak MCP and
+- [x] **MCP completion server.** `stage_complete` and `stage_progress` for harnesses that speak MCP and
       have no plugin system.
-- [ ] **CLI.** `check`, `render`, `simulate`, `status` and `runs`.
+- [x] **CLI.** `check`, `render`, `simulate`, `status` and `runs`.
 - [ ] **First adapter.** OpenClaw.
 - [ ] **Release.** CI on Node 22.13, the current LTS and the latest release, and an npm package
       published from GitHub Actions with provenance.

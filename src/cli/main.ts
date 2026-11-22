@@ -3,7 +3,9 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { checkCommand } from "./commands/check.js";
 import { renderCommand } from "./commands/render.js";
+import { runsCommand } from "./commands/runs.js";
 import { simulateCommand } from "./commands/simulate.js";
+import { statusCommand } from "./commands/status.js";
 
 export interface Io {
   out(text: string): void;
@@ -19,6 +21,10 @@ commands:
   simulate <file> --explore [--max-depth N] [--max-paths N] [--max-steps N] [--json]
                              explore every path up to a bound
                              (each path at most --max-steps ticks, 200 by default)
+  runs --store <path> [--status <s>[,<s>…]]… [--limit N] [--json]
+                             list runs, most recently updated first
+  status <run_id> --store <path> [--json] [--mermaid]
+                             show one run (the store is opened read-only)
 
   --help                     show this text
 `;
@@ -27,6 +33,8 @@ const COMMANDS: Record<string, (args: string[], io: Io) => Promise<number>> = {
   check: checkCommand,
   render: renderCommand,
   simulate: simulateCommand,
+  runs: runsCommand,
+  status: statusCommand,
 };
 
 /** Dispatches a subcommand and returns the process exit code. */

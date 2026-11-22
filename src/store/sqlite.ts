@@ -294,6 +294,7 @@ class SqliteTx implements StoreTx {
   listRuns(filter: {
     status?: RunStatus[];
     pipelineId?: string;
+    order?: "queue" | "recent";
     limit: number;
   }): RunRow[] {
     checkLimit(filter.limit);
@@ -310,7 +311,11 @@ class SqliteTx implements StoreTx {
     const clause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
     return this.all(
       `SELECT * FROM runs ${clause}
-       ORDER BY priority DESC, created_at ASC, run_id ASC LIMIT ?`,
+       ORDER BY ${
+         filter.order === "recent"
+           ? "updated_at DESC, created_at DESC, run_id DESC"
+           : "priority DESC, created_at ASC, run_id ASC"
+       } LIMIT ?`,
       ...params,
       filter.limit,
     ).map(runFromRow);
@@ -402,6 +407,7 @@ class SqliteTx implements StoreTx {
   }
 
   listStageRuns(filter: {
+    runId?: string;
     state?: StageRunState[];
     inFlight?: boolean;
     wakes?: false;
@@ -412,6 +418,10 @@ class SqliteTx implements StoreTx {
     checkLimit(filter.limit);
     const where: string[] = [];
     const params: Param[] = [];
+    if (filter.runId !== undefined) {
+      where.push("run_id = ?");
+      params.push(filter.runId);
+    }
     if (filter.state) {
       where.push(`state IN (${placeholders(filter.state.length)})`);
       params.push(...filter.state);

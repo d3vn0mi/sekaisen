@@ -211,10 +211,14 @@ export interface StoreTx {
 
   insertRun(row: RunRow): void;
   getRun(runId: string): RunRow | undefined;
-  /** Queue order: higher priority first, then oldest first. */
+  /**
+   * Queue order (the default): higher priority first, then oldest first.
+   * `order: "recent"` lists the most recently updated first instead.
+   */
   listRuns(filter: {
     status?: RunStatus[];
     pipelineId?: string;
+    order?: "queue" | "recent";
     limit: number;
   }): RunRow[];
   /** False when the run no longer matches `expect`; the caller re-reads. */
@@ -242,6 +246,8 @@ export interface StoreTx {
    * it, and orders them by that time, earliest first.
    */
   listStageRuns(filter: {
+    /** Keeps only the stage runs of this run. */
+    runId?: string;
     state?: StageRunState[];
     inFlight?: boolean;
     wakes?: false;

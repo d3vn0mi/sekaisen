@@ -406,6 +406,14 @@ describe("rows", () => {
         t.listRuns({ status: ["completed"], pipelineId: "demo", limit: 9 }),
       ).toHaveLength(1);
       expect(t.listRuns({ pipelineId: "zzz", limit: 9 })).toEqual([]);
+      t.updateRunIf(
+        "b",
+        { status: "working", currentStage: "draft" },
+        { updatedAt: 9_000_000_000_000 },
+      );
+      expect(
+        t.listRuns({ order: "recent", limit: 2 }).map((r) => r.runId)[0],
+      ).toBe("b");
 
       t.insertStageRun(
         stageRun({
@@ -437,6 +445,9 @@ describe("rows", () => {
       expect(
         t.listStageRuns({ inFlight: true, limit: 5 }).map((s) => s.stageRunId),
       ).toEqual(["x1"]);
+      expect(
+        t.listStageRuns({ runId: "a", limit: 5 }).map((s) => s.stageRunId),
+      ).toEqual(["x2"]);
       expect(
         t
           .listStageRuns({ inFlight: false, state: ["working"], limit: 5 })
