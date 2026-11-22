@@ -16,6 +16,9 @@ Pre-0.1. Nothing is installable yet.
 - Format 1: pipeline definitions in YAML with `agent`, `gate`, `check`, `action`, `wait` and `end`
   stages, a published JSON Schema (`sekaisen/schema.json`), field shorthand, identifiers, a small
   guard language and brief templates, documented in [`docs/format.md`](docs/format.md).
+- The package root exports the types its own signatures use: the store rows (`RunRow`, `StageRunRow`,
+  `GateRow`, `TransitionRow`, `LimitRow`), `RunStatus`, `StageRunState`, `Ending`, `RetryEnding`,
+  `JsonSchema` and the stage types.
 - The checks behind `sekaisen check`: schema, references, graph, termination, policy, timing and
   failure, plus a hook for checks the host adds.
 - The engine: dispatch-and-await of agent turns through a harness adapter, typed completion with

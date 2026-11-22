@@ -1,5 +1,26 @@
 import { readFileSync } from "node:fs";
 import { expect, test } from "vitest";
+import type {
+  ActionStage,
+  AgentStage,
+  CheckStage,
+  Definition,
+  Ending,
+  EndStage,
+  GateRow,
+  GateStage,
+  JsonSchema,
+  LimitRow,
+  Outcome,
+  RetryEnding,
+  RunRow,
+  RunStatus,
+  Stage,
+  StageRunRow,
+  StageRunState,
+  TransitionRow,
+  WaitStage,
+} from "../../src/index.js";
 import * as root from "../../src/index.js";
 
 test("the package root exports the core", () => {
@@ -21,6 +42,34 @@ test("the package root exports the core", () => {
       name === "VERSION" ? "string" : "function",
     ]);
   }
+});
+
+test("the package root names the types its own signatures use", () => {
+  // A compile-time check: `npm run typecheck` fails if any of these stops
+  // being exported from the root.
+  type Named = [
+    RunRow,
+    StageRunRow,
+    GateRow,
+    TransitionRow,
+    LimitRow,
+    RunStatus,
+    StageRunState,
+    RetryEnding,
+    Ending,
+    JsonSchema,
+    Definition,
+    Stage,
+    AgentStage,
+    GateStage,
+    CheckStage,
+    ActionStage,
+    WaitStage,
+    EndStage,
+    Outcome,
+  ];
+  const names: Named | undefined = undefined;
+  expect(names).toBeUndefined();
 });
 
 test("package.json exports the root, the MCP server and the schema", () => {

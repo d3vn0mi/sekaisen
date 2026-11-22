@@ -23,8 +23,20 @@ export {
   type RunStatusView,
   type Timers,
 } from "./engine/engine.js";
+export type { JsonSchema } from "./format/jsonschema.js";
 export { type LoadedDefinition, loadDefinition } from "./format/load.js";
-export type { Definition } from "./format/types.js";
+export type {
+  ActionStage,
+  AgentStage,
+  CheckStage,
+  Definition,
+  EndStage,
+  GateStage,
+  Outcome,
+  RetryEnding,
+  Stage,
+  WaitStage,
+} from "./format/types.js";
 export {
   type ActionFn,
   type CheckFn,
@@ -47,5 +59,16 @@ export {
   simulate,
 } from "./simulate/simulate.js";
 export { openSqliteStore } from "./store/sqlite.js";
-export type { OpenOptions, Store } from "./store/types.js";
+export type {
+  Ending,
+  GateRow,
+  LimitRow,
+  OpenOptions,
+  RunRow,
+  RunStatus,
+  StageRunRow,
+  StageRunState,
+  Store,
+  TransitionRow,
+} from "./store/types.js";
 export { VERSION } from "./version.js";
