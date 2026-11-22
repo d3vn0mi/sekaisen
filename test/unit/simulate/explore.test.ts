@@ -40,13 +40,30 @@ describe("explore", () => {
     // All defaults: a answers ok, b answers bad, and a is back where it began.
     expect(r.problems).toContainEqual({
       problem: "step_limit",
-      stage: "b",
+      stage: "a",
       path: ["a:ok", "b:bad", "a:ok"],
     });
-    expect(new Set(r.problems.map((p) => p.problem))).toEqual(
-      new Set(["step_limit"]),
-    );
+    // Every looping path is stuck in the same a-b loop, named by its first stage.
+    expect(
+      new Set(r.problems.map((p) => `${p.problem} at ${p.stage}`)),
+    ).toEqual(new Set(["step_limit at a"]));
     expect(r.coverage.untaken).toEqual([]);
+  });
+
+  test("a step limit names its loop's first stage, however it was found", async () => {
+    const loaded = await fixture("check-cycle");
+    const found = async (opts: { prune?: boolean; maxSteps?: number }) => {
+      const r = await explore(loaded, { maxDepth: 3, maxPaths: 2000, ...opts });
+      return [...new Set(r.problems.map((p) => `${p.problem} at ${p.stage}`))];
+    };
+    expect(await found({})).toEqual(["step_limit at c1"]);
+    expect(await found({ prune: false })).toEqual(["step_limit at c1"]);
+    expect(await found({ prune: false, maxSteps: 200 })).toEqual([
+      "step_limit at c1",
+    ]);
+    expect(await found({ prune: false, maxSteps: 201 })).toEqual([
+      "step_limit at c1",
+    ]);
   });
 
   test("a deploy reachable without the gate reports policy", async () => {
@@ -127,7 +144,7 @@ describe("explore", () => {
     });
   });
 
-  test("each path runs at most maxSteps ticks, 200 by default", async () => {
+  test("each path runs at most maxSteps ticks", async () => {
     const loaded = await fixture("review-loop");
     const r = await explore(loaded, { maxDepth: 0, maxPaths: 10, maxSteps: 1 });
     expect(r.problems).toEqual([
@@ -182,13 +199,15 @@ describe("explore", () => {
       "fix-loop",
       "deploy-ungated",
       "deploy-merge",
+      "check-cycle",
+      "unbounded",
     ]) {
       const loaded = await fixture(name);
       const limits = { maxDepth: 3, maxPaths: 100_000 };
       const pruned = await explore(loaded, limits);
       const full = await explore(loaded, { ...limits, prune: false });
       expect(full.truncated).toBe(false);
-      expect(pruned.paths).toBeLessThan(full.paths);
+      expect(pruned.paths).toBeLessThanOrEqual(full.paths);
       expect(pruned.coverage).toEqual(full.coverage);
       const kinds = (r: typeof full) =>
         [

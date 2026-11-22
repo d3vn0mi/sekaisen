@@ -194,7 +194,7 @@ describe("sekaisen simulate", () => {
     expect(r.lines[0]).toMatch(/^explore: \d+ paths, [1-9]\d* problems$/);
     // Grouped by kind and stage, with the shortest path of each group.
     expect(r.lines).toContain(
-      "problem: step_limit at b (4 paths): a:ok → b:bad → a:ok",
+      "problem: step_limit at a (7 paths): a:ok → b:bad → a:ok",
     );
     expect(r.lines.at(-1)).toBe("edges: 3/3");
   });

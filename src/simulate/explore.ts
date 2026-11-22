@@ -45,7 +45,11 @@ export interface ExploreProblem {
   /** The choice made at each decision of the run, as `<stage>:<choice>`. */
   path: string[];
   problem: ExploreProblemKind;
-  /** For `policy` the deploying stage entered; otherwise where the run stopped. */
+  /**
+   * For `policy` the deploying stage entered. Otherwise the first stage, in
+   * definition order, of the loop the run was going round, or the last
+   * stage it entered when it was not looping.
+   */
   stage: string;
 }
 
@@ -216,13 +220,36 @@ function problemsOf(
 ): Array<{ problem: ExploreProblemKind; stage: string }> {
   const out: Array<{ problem: ExploreProblemKind; stage: string }> =
     deployedUngated(def, r).map((stage) => ({ problem: "policy", stage }));
-  const stage = r.log.findLast((l) => l.run_stage !== "run")?.run_stage ?? "";
+  const stage = stuckAt(def, r);
   if (r.problems.some((p) => /^(max_steps|stopped):/.test(p))) {
     out.push({ problem: "step_limit", stage });
   } else if (!r.reachedEnd) {
     out.push({ problem: "no_end", stage });
   }
   return out;
+}
+
+/**
+ * Where a run that did not end is stuck: the stage of the loop it was
+ * going round that comes first in the definition, or the last stage it
+ * entered when it was not looping. It depends on the loop alone, not on
+ * when the loop was noticed.
+ */
+function stuckAt(def: Definition, r: SimulationResult): string {
+  // Stages in the order they were entered; a retry is not a new entry.
+  const entered: string[] = [];
+  for (const line of r.log) {
+    if (line.event !== "stage_submitted" || line.run_stage === "run") continue;
+    if (entered.at(-1) !== line.run_stage) entered.push(line.run_stage);
+  }
+  const last = entered.at(-1);
+  if (last === undefined) return "";
+  // One round of the loop: everything entered since the last stage's
+  // previous entry.
+  const before = entered.lastIndexOf(last, entered.length - 2);
+  if (before < 0) return last;
+  const loop = new Set(entered.slice(before + 1));
+  return Object.keys(def.stages).find((id) => loop.has(id)) ?? last;
 }
 
 /** Every deploying stage entered before any operator answered a gate, once each. */

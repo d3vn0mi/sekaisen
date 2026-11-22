@@ -1,0 +1,19 @@
+format: 1
+id: check-cycle
+title: Two checks that can send each other round for ever
+version: 1
+start: c1
+stages:
+  c1:
+    type: check
+    check: demo.first
+    outcomes:
+      x: c2
+  c2:
+    type: check
+    check: demo.second
+    outcomes:
+      back: c1
+      out: done
+  done: { type: end, status: completed }
+  failed: { type: end, status: failed }

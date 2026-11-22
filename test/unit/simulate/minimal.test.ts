@@ -115,4 +115,59 @@ describe("minimalFields", () => {
       }),
     ).toEqual({ n: 4 });
   });
+
+  test("a stricter bound beside a branch or a $ref holds", () => {
+    expect(
+      minimalFields({
+        type: "string",
+        minLength: 3,
+        anyOf: [{ minLength: 1 }],
+      }),
+    ).toBe("xxx");
+    expect(
+      minimalFields({
+        type: "object",
+        properties: { s: { $ref: "#/$defs/text", minLength: 1 } },
+        required: ["s"],
+        $defs: { text: { type: "string", minLength: 3 } },
+      }),
+    ).toEqual({ s: "xxx" });
+    expect(
+      minimalFields({
+        type: "array",
+        minItems: 1,
+        items: { type: "integer", minimum: 3 },
+        anyOf: [{ items: { maximum: 5 } }],
+      }),
+    ).toEqual([3]);
+  });
+
+  test("required joins, enum intersects, a clashing keyword is tried both ways", () => {
+    expect(
+      minimalFields({
+        type: "object",
+        properties: { a: { type: "string" }, b: { type: "integer" } },
+        required: ["a"],
+        oneOf: [{ required: ["b"] }],
+      }),
+    ).toEqual({ a: "x", b: 0 });
+    expect(
+      minimalFields({ enum: ["p", "q"], anyOf: [{ enum: ["q", "r"] }] }),
+    ).toBe("q");
+    // The branch's type list is tried first and gives "x", which the whole
+    // schema refuses; the sibling's integer is tried next.
+    expect(
+      minimalFields({
+        type: "integer",
+        anyOf: [{ type: ["string", "integer"] }],
+      }),
+    ).toBe(0);
+  });
+
+  test("each type of a type list is tried in order", () => {
+    expect(
+      minimalFields({ type: ["string", "null"], pattern: "^a" }),
+    ).toBeNull();
+    expect(minimalFields({ type: ["integer", "string"] })).toBe(0);
+  });
 });
