@@ -762,3 +762,46 @@ describe("the tick at scale", () => {
     expect(unobserved).toEqual([]);
   });
 });
+
+describe("error reporting", () => {
+  it("onError receives what the engine could not do, instead of the console", async () => {
+    const seen: Array<[string, unknown]> = [];
+    const r = await make({
+      onError: (message, err) => {
+        seen.push([message, err]);
+      },
+    });
+    const down = new Error("harness down");
+    r.adapter.capabilities = () => Promise.reject(down);
+    await r.engine.startRun("review-loop", { topic: "rust" });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await r.engine.tick();
+      expect(logged).not.toHaveBeenCalled();
+    } finally {
+      logged.mockRestore();
+    }
+    expect(seen).toEqual([["harness down", down]]);
+  });
+
+  it("a throwing onError cannot break the tick; without one the console is used", async () => {
+    const r = await make({
+      onError: () => {
+        throw new Error("handler broke");
+      },
+    });
+    r.adapter.capabilities = () => Promise.reject(new Error("harness down"));
+    await r.engine.startRun("review-loop", { topic: "rust" });
+    await expect(r.engine.tick()).resolves.toBeUndefined();
+
+    const plain = await make();
+    plain.adapter.capabilities = () => Promise.reject(new Error("down"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await plain.engine.tick();
+      expect(logged).toHaveBeenCalledWith("sekaisen: down");
+    } finally {
+      logged.mockRestore();
+    }
+  });
+});

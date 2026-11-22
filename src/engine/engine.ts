@@ -143,6 +143,14 @@ export interface EngineOptions {
    * time; 4 by default. Each is still bounded by `adapterCallTimeoutMs`.
    */
   concurrency?: number;
+  /**
+   * Receives what the engine could not do and carried on past: a harness
+   * call that failed, a stage run it had to skip this tick. `message` is
+   * one line; `err` is the error behind it, when there is one. By default
+   * the message goes to `console.error`, prefixed `sekaisen: `. A handler
+   * that throws is ignored.
+   */
+  onError?: (message: string, err?: unknown) => void;
 }
 
 export interface RunStatusView {
@@ -1305,7 +1313,18 @@ export class Engine {
   }
 
   private report(err: unknown): void {
-    console.error(`sekaisen: ${errorMessage(err)}`);
+    const message = errorMessage(err);
+    const onError = this.o.onError;
+    if (!onError) {
+      console.error(`sekaisen: ${message}`);
+      return;
+    }
+    try {
+      if (typeof err === "string") onError(message);
+      else onError(message, err);
+    } catch {
+      // The handler's failure is its own; the engine carries on.
+    }
   }
 }
 
