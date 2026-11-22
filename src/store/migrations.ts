@@ -53,6 +53,7 @@ export const MIGRATIONS: readonly string[] = [
     started_at      INTEGER,
     ended_at        INTEGER,
     outcome         TEXT,
+    ending          TEXT,
     fields_json     TEXT,
     progress_note   TEXT,
     runtime_json    TEXT,

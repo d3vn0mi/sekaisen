@@ -1,0 +1,119 @@
+import { PLACEHOLDER } from "../checks/references.js";
+import type { JsonSchema } from "../format/jsonschema.js";
+
+/** The outcomes of a stage as the brief needs them: names and field schemas. */
+export type BriefOutcomes = Record<string, { fields?: JsonSchema }>;
+
+export interface BriefData {
+  /** The run's inputs. */
+  inputs: unknown;
+  runId: string;
+  /** Fields recorded by earlier stages, by stage id. */
+  stages: Record<string, Record<string, unknown>>;
+  /** Outcomes of the stage being briefed. */
+  outcomes: BriefOutcomes;
+  /** The plain completion token, shown to the agent once per turn. */
+  token: string;
+}
+
+/**
+ * The text appended to every brief. `{token}` and `{outcomes}` are filled in
+ * at render time; everything else is fixed. The format documentation quotes
+ * this text, so change them together.
+ */
+export const BRIEF_FOOTER = `---
+
+## Reporting your result
+
+Your completion token is: {token}
+
+When you are finished, call \`stage_complete\` with three arguments: \`token\` (the token above), \`outcome\` (one of the outcomes below) and \`fields\` (an object with the fields listed for that outcome; a field ending in \`?\` is optional).
+
+Outcomes:
+{outcomes}
+
+If you cannot finish in this turn, call \`stage_progress\` with \`token\` and \`note\` to save a checkpoint. A later turn starts from your note.
+`;
+
+function fieldsShorthand(schema: JsonSchema | undefined): string {
+  const props = schema?.properties ?? {};
+  const required = new Set(schema?.required ?? []);
+  const parts = Object.entries(props).map(([name, s]) => {
+    const type = Array.isArray(s.type) ? s.type.join("|") : (s.type ?? "any");
+    const base =
+      type === "array" && s.items?.type === "string" ? "string[]" : type;
+    return `${name}: ${base}${required.has(name) ? "" : "?"}`;
+  });
+  return parts.length === 0 ? "no fields" : `fields: ${parts.join(", ")}`;
+}
+
+/** One line per outcome, with its fields in shorthand. */
+export function outcomesList(outcomes: BriefOutcomes): string {
+  return Object.entries(outcomes)
+    .map(([name, o]) => `- ${name} (${fieldsShorthand(o.fields)})`)
+    .join("\n");
+}
+
+function footer(token: string, outcomes: BriefOutcomes): string {
+  // Function replacers: the token and outcome text must never be read as
+  // replacement patterns.
+  return BRIEF_FOOTER.replace("{token}", () => token).replace(
+    "{outcomes}",
+    () => outcomesList(outcomes),
+  );
+}
+
+function descend(value: unknown, path: string[]): unknown {
+  let cur = value;
+  for (const key of path) {
+    if (
+      cur === null ||
+      typeof cur !== "object" ||
+      !Object.hasOwn(cur as object, key)
+    ) {
+      return undefined;
+    }
+    cur = (cur as Record<string, unknown>)[key];
+  }
+  return cur;
+}
+
+function show(value: unknown): string {
+  return typeof value === "string" ? value : (JSON.stringify(value) ?? "");
+}
+
+function resolve(name: string, data: BriefData): string {
+  const [head = "", ...rest] = name.split(".");
+  if (name === "run.id") return data.runId;
+  if (name === "stage.outcomes") return outcomesList(data.outcomes);
+  const value =
+    head === "inputs"
+      ? descend(data.inputs, rest)
+      : descend(data.stages, [head, ...rest]);
+  return value === undefined ? `(unset: ${name})` : show(value);
+}
+
+/**
+ * Fills a brief's placeholders and appends the footer. Values are inserted as
+ * they are: briefs are Markdown for an agent, not HTML. Substituted text is
+ * not scanned again.
+ */
+export function renderBrief(template: string, data: BriefData): string {
+  const body = template.replace(PLACEHOLDER, (_m, name: string) =>
+    resolve(name.trim(), data),
+  );
+  return `${body.trimEnd()}\n\n${footer(data.token, data.outcomes)}`;
+}
+
+/** The message for a later turn on the same stage run. */
+export function renderContinuation(
+  note: string | null,
+  token: string,
+  outcomes: BriefOutcomes,
+): string {
+  const lead =
+    note === null || note.trim() === ""
+      ? "Continue the task you were working on."
+      : `Continue the task you were working on. Your last checkpoint:\n\n${note}`;
+  return `${lead}\n\n${footer(token, outcomes)}`;
+}

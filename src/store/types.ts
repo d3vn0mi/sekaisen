@@ -1,4 +1,7 @@
-import type { Definition } from "../format/types.js";
+import type { Definition, RetryEnding } from "../format/types.js";
+
+/** How the engine classified the end of a stage run that did not complete. */
+export type Ending = RetryEnding | "usage_limited";
 
 export type RunStatus =
   | "working"
@@ -56,6 +59,7 @@ export interface StageRunRow {
   state: StageRunState;
   /** SHA-256 of the completion token; null once the token is retired. */
   tokenHash: string | null;
+  /** `${runId}:${stage}:${attempt}`, derived by the store on insert and immutable. */
   idempotencyKey: string;
   adapterRunId: string | null;
   sessionKey: string | null;
@@ -68,6 +72,8 @@ export interface StageRunRow {
   startedAt: number | null;
   endedAt: number | null;
   outcome: string | null;
+  /** The engine-classified ending of a non-completed attempt; unset otherwise. */
+  ending?: Ending;
   fields: unknown;
   progressNote: string | null;
   runtime: RuntimeInfo | null;
@@ -105,6 +111,9 @@ export interface LimitRow {
   reason: string;
   setAt: number;
 }
+
+/** A stage run as a caller supplies it; the store adds the idempotency key. */
+export type NewStageRun = Omit<StageRunRow, "idempotencyKey">;
 
 /** Columns a compare-and-set may change on a run. */
 export type RunPatch = Partial<
@@ -150,7 +159,8 @@ export interface StoreTx {
     patch: RunPatch,
   ): boolean;
 
-  insertStageRun(row: StageRunRow): void;
+  /** The store derives `idempotencyKey` from run, stage and attempt. */
+  insertStageRun(row: NewStageRun): void;
   getStageRun(stageRunId: string): StageRunRow | undefined;
   /** The newest stage run of the run that is submitted, working or input_required. */
   liveStageRun(runId: string): StageRunRow | undefined;

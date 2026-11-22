@@ -8,8 +8,10 @@ import { VERSION } from "../index.js";
 import { MIGRATIONS, SCHEMA_VERSION } from "./migrations.js";
 import type {
   DefinitionRow,
+  Ending,
   GateRow,
   LimitRow,
+  NewStageRun,
   OpenOptions,
   RunPatch,
   RunRow,
@@ -47,6 +49,7 @@ const STAGE_RUN_COLUMNS: Record<keyof StageRunPatch, string> = {
   startedAt: "started_at",
   endedAt: "ended_at",
   outcome: "outcome",
+  ending: "ending",
   fields: "fields_json",
   progressNote: "progress_note",
   runtime: "runtime_json",
@@ -108,6 +111,7 @@ function stageRunFromRow(r: Row): StageRunRow {
     startedAt: r.started_at as number | null,
     endedAt: r.ended_at as number | null,
     outcome: r.outcome as string | null,
+    ...(typeof r.ending === "string" ? { ending: r.ending as Ending } : {}),
     fields: fromJson(r.fields_json),
     progressNote: r.progress_note as string | null,
     runtime: fromJson(r.runtime_json) as StageRunRow["runtime"],
@@ -303,15 +307,15 @@ class SqliteTx implements StoreTx {
     return Number(result.changes) === 1;
   }
 
-  insertStageRun(row: StageRunRow): void {
+  insertStageRun(row: NewStageRun): void {
     this.run(
       `INSERT INTO stage_runs
          (stage_run_id, run_id, stage, attempt, visit, retry_index, state,
           token_hash, idempotency_key, adapter_run_id, session_key, turns_used,
           dispatch_seq,
-          deadline_at, created_at, started_at, ended_at, outcome, fields_json,
-          progress_note, runtime_json, wait_reason)
-       VALUES (${placeholders(22)})`,
+          deadline_at, created_at, started_at, ended_at, outcome, ending,
+          fields_json, progress_note, runtime_json, wait_reason)
+       VALUES (${placeholders(23)})`,
       row.stageRunId,
       row.runId,
       row.stage,
@@ -320,7 +324,7 @@ class SqliteTx implements StoreTx {
       row.retryIndex,
       row.state,
       row.tokenHash,
-      row.idempotencyKey,
+      `${row.runId}:${row.stage}:${row.attempt}`,
       row.adapterRunId,
       row.sessionKey,
       row.turnsUsed,
@@ -330,6 +334,7 @@ class SqliteTx implements StoreTx {
       row.startedAt,
       row.endedAt,
       row.outcome,
+      row.ending ?? null,
       toJson(row.fields),
       row.progressNote,
       toJson(row.runtime),
@@ -592,9 +597,49 @@ function currentVersion(db: DatabaseSync): number {
   return row ? Number(row.value) : 0;
 }
 
+const BUSY_TIMEOUT_MS = 5000;
+
+function isBusy(err: unknown): boolean {
+  return (
+    err instanceof Error && /database is locked|SQLITE_BUSY/i.test(err.message)
+  );
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Runs `attempt`, retrying with a short backoff while SQLite reports the
+ * database as locked, until `budgetMs` has elapsed. SQLite's own busy handler
+ * does not cover the switch to WAL on a file another process is creating at
+ * that moment, so the first open of a new file can fail without it.
+ */
+export function retryWhileBusy(
+  attempt: () => void,
+  budgetMs: number = BUSY_TIMEOUT_MS,
+  clock: { now(): number; sleep(ms: number): void } = {
+    now: Date.now,
+    sleep: sleepSync,
+  },
+): void {
+  const start = clock.now();
+  for (let wait = 5; ; wait = Math.min(wait * 2, 100)) {
+    try {
+      attempt();
+      return;
+    } catch (err) {
+      if (!isBusy(err) || clock.now() - start >= budgetMs) throw err;
+      clock.sleep(wait);
+    }
+  }
+}
+
 function migrate(db: DatabaseSync): void {
-  // Read the version under the write lock: another process may be creating
-  // the same file at the same moment.
+  // Read the version under the write lock, so two processes that both see a
+  // new file cannot both apply the schema. Opening the same new file from
+  // several processes at once relies on retryWhileBusy for the WAL switch
+  // and on busy_timeout for this lock.
   db.exec("BEGIN IMMEDIATE");
   try {
     const from = currentVersion(db);
@@ -642,12 +687,12 @@ export function openSqliteStore(
   }
   const db = new DatabaseSync(path, { readOnly: readonly });
   try {
-    db.exec("PRAGMA busy_timeout = 5000");
+    db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
     db.exec("PRAGMA foreign_keys = ON");
     if (readonly) {
       db.exec("PRAGMA query_only = ON");
     } else {
-      db.exec("PRAGMA journal_mode = WAL");
+      retryWhileBusy(() => db.exec("PRAGMA journal_mode = WAL"));
       db.exec("PRAGMA synchronous = FULL");
     }
     const version = currentVersion(db);

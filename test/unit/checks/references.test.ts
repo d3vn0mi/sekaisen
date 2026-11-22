@@ -156,6 +156,14 @@ describe("references", () => {
     expect(fs.filter((f) => f.message.includes("inputs.topic"))).toEqual([]);
   });
 
+  test("run.id and stage.outcomes are filled in by the engine and accepted", async () => {
+    const l = loaded(
+      { a: agent({ ok: { next: "z" } }), z: end() },
+      { briefs: { "briefs/a.md": "run {{run.id}}: {{ stage.outcomes }}" } },
+    );
+    expect(only(await run(l), "references")).toEqual([]);
+  });
+
   test("a placeholder for a stage not on every path is a warning", async () => {
     const l = loaded(
       {

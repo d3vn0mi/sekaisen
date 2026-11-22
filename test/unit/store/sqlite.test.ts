@@ -7,6 +7,7 @@ import type { Definition } from "../../../src/format/types.js";
 import { SCHEMA_VERSION } from "../../../src/store/migrations.js";
 import { openSqliteStore } from "../../../src/store/sqlite.js";
 import type {
+  NewStageRun,
   RunRow,
   StageRunRow,
   Store,
@@ -30,7 +31,7 @@ const run = (over: Partial<RunRow> = {}): RunRow => ({
   ...over,
 });
 
-const stageRun = (over: Partial<StageRunRow> = {}): StageRunRow => ({
+const stageRun = (over: Partial<NewStageRun> = {}): NewStageRun => ({
   stageRunId: "s1",
   runId: "r1",
   stage: "draft",
@@ -39,7 +40,6 @@ const stageRun = (over: Partial<StageRunRow> = {}): StageRunRow => ({
   retryIndex: 0,
   state: "submitted",
   tokenHash: null,
-  idempotencyKey: "r1:draft:1",
   adapterRunId: null,
   sessionKey: null,
   turnsUsed: 0,
@@ -314,7 +314,10 @@ describe("rows", () => {
         progressNote: "half",
       });
       t.insertStageRun(sr);
-      expect(t.getStageRun("s1")).toEqual(sr);
+      expect(t.getStageRun("s1")).toEqual({
+        ...sr,
+        idempotencyKey: "r1:draft:1",
+      });
 
       t.upsertGate({
         stageRunId: "s1",
@@ -386,7 +389,6 @@ describe("rows", () => {
         stageRun({
           stageRunId: "x2",
           runId: "a",
-          idempotencyKey: "a:d:1",
           createdAt: 20,
         }),
       );
@@ -394,7 +396,6 @@ describe("rows", () => {
         stageRun({
           stageRunId: "x1",
           runId: "b",
-          idempotencyKey: "b:d:1",
           createdAt: 10,
           state: "working",
         }),
@@ -464,7 +465,6 @@ describe("rows", () => {
           stageRun({
             stageRunId: `s${n}`,
             attempt: n,
-            idempotencyKey: `r1:draft:${n}`,
             state,
             outcome,
           }),
@@ -477,7 +477,6 @@ describe("rows", () => {
         stageRun({
           stageRunId: "o",
           stage: "other",
-          idempotencyKey: "r1:other:1",
           state: "completed",
           outcome: "revise",
         }),
@@ -515,7 +514,6 @@ describe("attempts, visits and turn keys", () => {
             attempt: n,
             visit,
             retryIndex,
-            idempotencyKey: `r1:draft:${n}`,
           }),
         );
       mk(1, 1, 0);
@@ -524,6 +522,30 @@ describe("attempts, visits and turn keys", () => {
       expect(t.maxAttempt("r1", "draft")).toBe(3);
       expect(t.countVisits("r1", "draft")).toBe(2);
       expect(t.maxAttempt("r1", "other")).toBe(0);
+    });
+  });
+
+  it("derives the idempotency key and round-trips the ending", () => {
+    const store = open();
+    store.tx((t) => {
+      seed(t);
+      t.insertStageRun(stageRun({ attempt: 3, ending: "usage_limited" }));
+      const row = t.getStageRun("s1");
+      expect(row?.idempotencyKey).toBe("r1:draft:3");
+      expect(row?.ending).toBe("usage_limited");
+      t.insertStageRun(stageRun({ stageRunId: "s2", attempt: 4 }));
+      expect(t.getStageRun("s2")?.ending).toBeUndefined();
+      expect(
+        t.updateStageRunIf(
+          "s2",
+          { state: "submitted", attempt: 4 },
+          {
+            state: "failed",
+            ending: "timeout",
+          },
+        ),
+      ).toBe(true);
+      expect(t.getStageRun("s2")?.ending).toBe("timeout");
     });
   });
 

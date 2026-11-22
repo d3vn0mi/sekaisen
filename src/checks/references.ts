@@ -32,7 +32,7 @@ function counters(ast: GuardAst): Counter[] {
   }
 }
 
-const PLACEHOLDER = /\{\{\s*([^{}]*?)\s*\}\}/g;
+export const PLACEHOLDER = /\{\{\s*([^{}]*?)\s*\}\}/g;
 
 /**
  * For each stage, the stages that lie on every path from start to it
@@ -166,6 +166,8 @@ export function referenceFindings(
       const name = (m[1] ?? "").trim();
       if (seen.has(name)) continue;
       seen.add(name);
+      // Names the engine itself fills in at render time.
+      if (name === "run.id" || name === "stage.outcomes") continue;
       const head = name.split(".")[0] ?? "";
       const shown = `${label}: placeholder {{${name}}}`;
       if (head === "inputs" && name.includes(".")) continue;
