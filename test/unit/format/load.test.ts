@@ -123,6 +123,20 @@ describe("loadDefinition", () => {
     );
   });
 
+  test("reserved stage ids are rejected", async () => {
+    for (const id of ["run", "stage", "inputs"]) {
+      const file = await rewrite((y) =>
+        y.replace(
+          "  done: { type: end, status: completed }",
+          `  ${id}: { type: end, status: failed }\n  done: { type: end, status: completed }`,
+        ),
+      );
+      expect((await loadDefinition(file)).problems).toContain(
+        `stage id ${id} is reserved`,
+      );
+    }
+  });
+
   test("reserved outcome names are rejected", async () => {
     const file = await rewrite((y) =>
       y.replace(

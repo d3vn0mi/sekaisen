@@ -21,6 +21,7 @@ export class VirtualClock implements Clock {
   }
 
   set(ms: number): void {
+    if (!Number.isFinite(ms)) throw new Error("a clock needs a finite time");
     this.t = ms;
   }
 }

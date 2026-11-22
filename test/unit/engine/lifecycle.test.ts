@@ -74,6 +74,8 @@ describe("clock", () => {
     c.set(7);
     expect(c.now()).toBe(7);
     expect(() => c.advance(-1)).toThrow();
+    expect(() => c.set(Number.NaN)).toThrow();
+    expect(() => c.set(Number.POSITIVE_INFINITY)).toThrow();
   });
 
   it("the system clock reads real time", () => {

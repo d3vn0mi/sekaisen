@@ -266,6 +266,9 @@ const STAGE_DEFS: Record<string, string> = {
   end: "endStage",
 };
 
+/** Names a placeholder reads as engine values, so no stage may use them. */
+const RESERVED_STAGE_IDS = ["run", "stage", "inputs"];
+
 const RESERVED_OUTCOMES = ["on_timeout", "on_exhausted", "on_cancel", "next"];
 
 /** Rules the schema cannot say: reserved outcome names and gate kinds. */
@@ -304,6 +307,9 @@ function schemaProblems(doc: Raw): string[] {
   const stages = isObject(doc.stages) ? doc.stages : {};
   for (const [id, stage] of Object.entries(stages)) {
     const where = `/stages/${id}`;
+    if (RESERVED_STAGE_IDS.includes(id)) {
+      problems.push(`stage id ${id} is reserved`);
+    }
     if (!isObject(stage)) {
       problems.push(`${where}: must be object`);
       continue;
