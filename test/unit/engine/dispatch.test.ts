@@ -722,6 +722,17 @@ describe("the tick at scale", () => {
     expect(most).toBe(3);
   });
 
+  it("writes no observation marks while every turn in flight fits one tick", async () => {
+    const { engine, store } = await make();
+    await engine.startRun("review-loop", { topic: "a" });
+    await engine.tick();
+    await engine.tick();
+    const marked = store.tx((t) =>
+      t.listStageRuns({ inFlight: true, limit: 10 }).map((s) => s.observedAt),
+    );
+    expect(marked).toEqual([null]);
+  });
+
   it("reads the least recently observed turns first, so none is left unread", async () => {
     const { engine, adapter, store, clock } = await make();
     adapter.caps = { ...adapter.caps, maxConcurrent: 200 };

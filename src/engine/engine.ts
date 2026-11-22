@@ -12,6 +12,7 @@ import {
   type AgentSlot,
   admit,
   isPause,
+  lanesTaken,
   pauseReason,
 } from "../scheduler/scheduler.js";
 import type {
@@ -194,6 +195,8 @@ export class Engine {
   private readonly callTimeoutMs: number;
   private readonly timers: Timers;
   private readonly concurrency: number;
+  /** Whether the agent pass last hit its page cap, and said so. */
+  private capReported = false;
   private caps?: Promise<Capabilities>;
   /**
    * Stage runs whose turn was in flight when the engine started and that
@@ -599,11 +602,13 @@ export class Engine {
       this.report(err);
     }
     // Turns first, so a continuation or retry they submit is dispatched in
-    // the same pass. The least recently observed are taken, and marked, so
-    // every turn in flight is read in turn however many there are.
+    // the same pass. When more are in flight than one tick reads, the least
+    // recently observed are taken, and marked, so every one is read in turn.
     const inFlight = this.store.tx((t) => {
       const now = this.clock.now();
-      const rows = t.listStageRuns({ inFlight: true, limit: TICK_BATCH });
+      const rows = t.listStageRuns({ inFlight: true, limit: TICK_BATCH + 1 });
+      if (rows.length <= TICK_BATCH) return rows;
+      rows.length = TICK_BATCH;
       for (const row of rows) {
         t.updateStageRunIf(
           row.stageRunId,
@@ -849,30 +854,38 @@ export class Engine {
     const now = this.clock.now();
     const plan = this.store.tx((t) => {
       const working = t.listWorking();
+      const holding = t.listLaneHolders();
       const limits = t.listLimits(now);
       const runs = new Map<string, RunRow>();
       const slots = new Map<string, AgentSlot>();
       const describe = (row: StageRunRow): AgentSlot | undefined => {
         if (slots.has(row.stageRunId)) return slots.get(row.stageRunId);
-        const run = runs.get(row.runId) ?? t.getRun(row.runId);
-        if (!run) return undefined;
-        runs.set(run.runId, run);
-        const pinned = this.pinned.of(t, run);
-        const stage = pinned.def.stages[row.stage];
-        if (stage?.type !== "agent") return undefined;
-        const slot = {
-          agent: stage.agent,
-          sessionKey: sessionKeyOf(run, stage),
-          providers: pinned.def.providers,
-        };
-        slots.set(row.stageRunId, slot);
-        return slot;
+        try {
+          const run = runs.get(row.runId) ?? t.getRun(row.runId);
+          if (!run) return undefined;
+          runs.set(run.runId, run);
+          const pinned = this.pinned.of(t, run);
+          const stage = pinned.def.stages[row.stage];
+          if (stage?.type !== "agent") return undefined;
+          const slot = {
+            agent: stage.agent,
+            sessionKey: sessionKeyOf(run, stage),
+            providers: pinned.def.providers,
+          };
+          slots.set(row.stageRunId, slot);
+          return slot;
+        } catch (err) {
+          // One stage run whose definition cannot be read must not stop
+          // the pass; it is left out of it.
+          this.report(`scheduling ${row.stageRunId}: ${errorMessage(err)}`);
+          return undefined;
+        }
       };
-      const free =
-        caps.maxConcurrent - working.filter((row) => describe(row)).length;
+      for (const row of [...working, ...holding]) describe(row);
       const stageOf = (row: StageRunRow) => slots.get(row.stageRunId);
       const ctx = {
         working,
+        holding,
         limits,
         capabilities: caps,
         wip: (agent: string) => this.wipOf(agent),
@@ -880,12 +893,14 @@ export class Engine {
         now,
         stageOf,
       };
+      const free = caps.maxConcurrent - lanesTaken(ctx);
       const expired: StageRunRow[] = [];
       const open: StageRunRow[] = [];
       // Page on while lanes are free and refused stage runs fill the page:
       // the store's order is the scheduler's, so a later page never changes
       // what an earlier one decided.
       let decision = admit(open, ctx);
+      let capped = false;
       for (let page = 0; page < MAX_CANDIDATE_PAGES; page++) {
         const rows = t.listDispatchable(TICK_BATCH, page * TICK_BATCH);
         for (const row of rows) {
@@ -898,18 +913,25 @@ export class Engine {
         }
         decision = admit(open, ctx);
         if (rows.length < TICK_BATCH || decision.admit.length >= free) break;
-        if (page === MAX_CANDIDATE_PAGES - 1) {
-          this.report(
-            `more than ${MAX_CANDIDATE_PAGES * TICK_BATCH} stage runs wait for dispatch; the rest wait for a later tick`,
-          );
-        }
+        capped = page === MAX_CANDIDATE_PAGES - 1;
       }
+      // Reported once, and again only after a pass below the cap.
+      if (capped && !this.capReported) {
+        this.report(
+          `more than ${MAX_CANDIDATE_PAGES * TICK_BATCH} stage runs wait for dispatch; the rest wait for a later tick`,
+        );
+      }
+      this.capReported = capped;
       const byId = new Map(open.map((row) => [row.stageRunId, row]));
       const waiting = decision.waiting.flatMap(({ id, reason }) => {
         const row = byId.get(id);
         return row ? [{ row, reason }] : [];
       });
-      const admitted = decision.admit.flatMap((id) => byId.get(id) ?? []);
+      const admitted = decision.admit.flatMap((id) => {
+        const row = byId.get(id);
+        const slot = row && stageOf(row);
+        return row && slot ? [{ row, providers: slot.providers }] : [];
+      });
       return { expired, waiting, admitted };
     });
     for (const row of plan.expired) {
@@ -925,11 +947,16 @@ export class Engine {
         recordWait(c, row, reason, isPause(reason));
       }
     });
-    for (const seen of plan.admitted) {
+    for (const { row: seen, providers } of plan.admitted) {
       try {
-        const row = this.commit((t, emit) =>
-          recordAdmit(this.txCtx(t, emit), seen),
-        );
+        // A turn started earlier in this pass may have hit a usage limit:
+        // pauses are read again before each start.
+        const row = this.commit((t, emit) => {
+          const c = this.txCtx(t, emit);
+          return recordAdmit(c, seen, (now) =>
+            pauseReason(now, providers, t.listLimits(c.now), caps, c.now),
+          );
+        });
         if (!row) continue;
         if (deadlinePassed(row, this.clock.now())) {
           await this.timeOut(row, caps);

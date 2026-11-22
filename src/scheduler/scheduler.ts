@@ -21,10 +21,12 @@ import type { LimitRow, RunRow, StageRunRow } from "../store/types.js";
  *   `pauseReason`);
  * - `wip:<agent>`: its agent already has `wip(agent)` working stage runs on
  *   the same session key;
- * - `lane_full`: `capabilities.maxConcurrent` agent stage runs are working.
+ * - `lane_full`: `capabilities.maxConcurrent` harness lanes are taken (see
+ *   `holdsLane`).
  *
- * Only agent stage runs take a lane or count toward WIP, and a candidate
- * admitted earlier in the same call counts at once.
+ * Only agent stage runs take a lane or count toward WIP; only working ones
+ * count toward WIP. A candidate admitted earlier in the same call counts at
+ * once.
  */
 
 /** What admission needs to know about an agent stage run. */
@@ -39,6 +41,12 @@ export interface AgentSlot {
 export interface AdmitCtx {
   /** Stage runs working now; those `stageOf` does not describe are ignored. */
   working: StageRunRow[];
+  /**
+   * Other stage runs that may still hold a harness turn (completed with a
+   * turn in flight, or with an abort pending); those `holdsLane` accepts
+   * take a lane, and never count toward WIP.
+   */
+  holding: StageRunRow[];
   /** Limits; those that end at or before `now` are ignored. */
   limits: LimitRow[];
   capabilities: Capabilities;
@@ -72,13 +80,48 @@ const PAUSED_PROVIDER = pausedReason(PROVIDER_SCOPE, "");
 export const isPause = (reason: string): boolean =>
   reason.startsWith("paused:");
 
+/**
+ * Whether a stage run holds a harness lane: it is working, or its agent
+ * completed it while its turn may still run (dispatched less than the
+ * harness's turn cap ago), or an abort of its turn is still pending.
+ */
+export function holdsLane(
+  row: StageRunRow,
+  now: number,
+  caps: Capabilities,
+): boolean {
+  if (row.state === "working" || row.abortRunId !== null) return true;
+  return (
+    row.state === "completed" &&
+    row.dispatchedAt !== null &&
+    row.adapterRunId !== null &&
+    now < row.dispatchedAt + caps.turnCapMs
+  );
+}
+
+/** How many harness lanes the agent stage runs of `ctx` take now. */
+export function lanesTaken(
+  ctx: Pick<
+    AdmitCtx,
+    "working" | "holding" | "stageOf" | "now" | "capabilities"
+  >,
+): number {
+  const seen = new Set<string>();
+  for (const row of [...ctx.working, ...ctx.holding]) {
+    if (!ctx.stageOf(row) || !holdsLane(row, ctx.now, ctx.capabilities)) {
+      continue;
+    }
+    seen.add(row.stageRunId);
+  }
+  return seen.size;
+}
+
 export function admit(candidates: StageRunRow[], ctx: AdmitCtx): Admission {
   const sessions = new Map<string, number>();
-  let lane = 0;
+  let lane = lanesTaken(ctx);
   for (const row of ctx.working) {
     const slot = ctx.stageOf(row);
     if (!slot) continue;
-    lane += 1;
     const key = sessionOf(slot);
     sessions.set(key, (sessions.get(key) ?? 0) + 1);
   }

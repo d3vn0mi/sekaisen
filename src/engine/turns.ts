@@ -331,15 +331,23 @@ export function recordWait(
 
 /**
  * Takes an admitted stage run off the wait: clears its reason and releases
- * a hold, moving the deadline by the time held. Returns the row as it now
- * is, or undefined when it is no longer the submitted attempt `seen` was.
+ * a hold, moving the deadline by the time held. `paused` is asked first,
+ * with the row as it now is: a pause it names holds the row instead (see
+ * `recordWait`). Returns the row as it now is, or undefined when it is held
+ * or no longer the submitted attempt `seen` was.
  */
 export function recordAdmit(
   c: TxCtx,
   seen: StageRunRow,
+  paused: (row: StageRunRow) => string | undefined = () => undefined,
 ): StageRunRow | undefined {
   const row = submittedNow(c, seen);
   if (!row) return undefined;
+  const reason = paused(row);
+  if (reason !== undefined) {
+    recordWait(c, row, reason, true);
+    return undefined;
+  }
   const patch: StageRunPatch = release(row, c.now);
   if (row.waitReason !== null) patch.waitReason = null;
   if (Object.keys(patch).length === 0) return row;

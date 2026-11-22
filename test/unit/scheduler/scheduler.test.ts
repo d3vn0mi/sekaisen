@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Capabilities } from "../../../src/adapter/types.js";
 import { PinnedDefinitions } from "../../../src/engine/pinned.js";
 import {
@@ -107,6 +107,7 @@ function ctx(
   const { slots = {}, ...rest } = over;
   return {
     working: [],
+    holding: [],
     limits: [],
     capabilities: CAPS,
     wip: () => 1,
@@ -206,6 +207,42 @@ describe("admit", () => {
     const held = admit(candidates.slice(0, 6), some);
     expect(held.admit).toEqual(["s0", "s1", "s2", "s3", "s4"]);
     expect(held.waiting).toEqual([{ id: "s5", reason: "lane_full" }]);
+  });
+
+  it("a turn still in flight on a finished stage run takes a lane", () => {
+    const runs = [run("r1"), run("x1"), run("x2")];
+    const one = { ...CAPS, maxConcurrent: 1 };
+    const candidates = [row("a", "r1", 1)];
+    // Completed by its agent while its turn still runs.
+    const done = row("d", "x1", 0, {
+      state: "completed",
+      dispatchedAt: 500,
+      adapterRunId: "fr_1",
+      sessionKey: "run:r1:drafter",
+    });
+    const at = (now: number, holding: StageRunRow[]) =>
+      admit(candidates, ctx(runs, { capabilities: one, holding, now }));
+    expect(at(1000, [done]).waiting).toEqual([
+      { id: "a", reason: "lane_full" },
+    ]);
+    // Past the harness's turn cap the turn has surely ended.
+    expect(at(500 + CAPS.turnCapMs, [done]).admit).toEqual(["a"]);
+    // A turn whose abort is still pending holds one too.
+    const aborting = row("f", "x2", 0, { state: "failed", abortRunId: "fr_2" });
+    expect(at(1000, [aborting]).waiting).toEqual([
+      { id: "a", reason: "lane_full" },
+    ]);
+    // Neither counts toward WIP, and other stage types take no lane.
+    expect(
+      admit(candidates, ctx(runs, { holding: [done, aborting] })).admit,
+    ).toEqual(["a"]);
+    const gate = { ...aborting, stageRunId: "g" };
+    expect(
+      admit(
+        candidates,
+        ctx(runs, { capabilities: one, holding: [gate], slots: { g: null } }),
+      ).admit,
+    ).toEqual(["a"]);
   });
 
   it("paused provider holds dispatch until the limit expires", () => {
@@ -411,6 +448,13 @@ describe("the engine's agent pass", () => {
 
   const live = (r: Rig, runId: string) => r.engine.status(runId).live;
 
+  /** The harness reports the last turn ended, so it frees its lane. */
+  const endLastTurn = (r: Rig) =>
+    r.adapter.setOutcome(`fr_${r.adapter.calls.length}`, {
+      state: "ended",
+      ending: "ok",
+    });
+
   it("a busy pipeline does not starve another on the same agent", async () => {
     const r = await make({}, { maxConcurrent: 1 });
     const busy = await r.engine.startRun("busy", {});
@@ -428,6 +472,7 @@ describe("the engine's agent pass", () => {
         outcome: "again",
       });
       expect(res.ok).toBe(true);
+      endLastTurn(r);
     }
     expect(order).toEqual([
       "busy",
@@ -471,6 +516,7 @@ describe("the engine's agent pass", () => {
 
     r.clock.advance(1000);
     await r.engine.complete({ token: lastToken(r.adapter), outcome: "again" });
+    endLastTurn(r);
     await r.engine.tick();
     const admitted = live(r, second.runId);
     expect(admitted?.state).toBe("working");
@@ -493,6 +539,7 @@ describe("the engine's agent pass", () => {
     await r.engine.tick();
     expect(r.adapter.calls).toHaveLength(1);
     expect(live(r, b.runId)?.waitReason).toBe("wip:drafter");
+    expect(live(r, a.runId)?.state).toBe("working");
 
     const two = await make({
       definitions: new SwapSource(shared("busy"), shared("quiet")),
@@ -502,7 +549,126 @@ describe("the engine's agent pass", () => {
     await two.engine.startRun("quiet", { project: "x" });
     await two.engine.tick();
     expect(two.adapter.calls).toHaveLength(2);
+  });
+
+  it("a completed stage run whose turn still runs holds the lane until the turn cap", async () => {
+    const r = await make({}, { maxConcurrent: 1 });
+    const { runId } = await r.engine.startRun("busy", {});
+    await r.engine.tick();
+    r.clock.advance(1000);
+    await r.engine.complete({ token: lastToken(r.adapter), outcome: "again" });
+    // The harness still reports the first turn running.
+    await r.engine.tick();
+    expect(r.adapter.calls).toHaveLength(1);
+    expect(live(r, runId)?.waitReason).toBe("lane_full");
+    r.clock.advance(r.adapter.caps.turnCapMs);
+    await r.engine.tick();
+    expect(r.adapter.calls).toHaveLength(2);
+    expect(live(r, runId)?.state).toBe("working");
+  });
+
+  it("rechecks pauses when it admits", async () => {
+    const r = await make({}, { maxConcurrent: 2 });
+    const a = await r.engine.startRun("busy", {});
+    r.clock.advance(1);
+    const b = await r.engine.startRun("quiet", {});
+    // The first turn start is refused for a usage limit that pauses every
+    // fleet dispatch; the second admitted row must not start after it.
+    r.adapter.beforeStart = () => {
+      r.store.tx((t) =>
+        t.putLimit({
+          scope: "provider",
+          key: "included",
+          pausedUntil: r.clock.now() + 60_000,
+          reason: "limit",
+          setAt: r.clock.now(),
+        }),
+      );
+      r.adapter.beforeStart = undefined;
+    };
+    await r.engine.tick();
+    expect(r.adapter.calls).toHaveLength(1);
     expect(live(r, a.runId)?.state).toBe("working");
+    const held = live(r, b.runId);
+    expect([held?.state, held?.waitReason]).toEqual([
+      "submitted",
+      "paused:provider:included",
+    ]);
+    expect(held?.heldSince).toBe(r.clock.now());
+  });
+
+  it("skips a stage run whose definition cannot be read and goes on", async () => {
+    const r = await make();
+    const broken = await r.engine.startRun("busy", {});
+    // A run pinned to a stored definition that cannot be read.
+    r.store.tx((t) => {
+      t.putDefinition({
+        pipelineId: "busy",
+        hash: "garbled",
+        version: 1,
+        parsed: {} as Definition,
+        briefs: {},
+        loadedAt: 0,
+      });
+      t.insertRun({
+        ...(t.getRun(broken.runId) as RunRow),
+        runId: "r_orphan",
+        defHash: "garbled",
+      });
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      r.store.tx((t) => {
+        const src = t.liveStageRun(broken.runId) as StageRunRow;
+        const { idempotencyKey: _k, ...fresh } = {
+          ...src,
+          stageRunId: "s_orphan",
+          runId: "r_orphan",
+          createdAt: 0,
+        };
+        t.insertStageRun(fresh);
+      });
+      const ok = await r.engine.startRun("quiet", {});
+      await r.engine.tick();
+      expect(live(r, ok.runId)?.state).toBe("working");
+      expect(live(r, broken.runId)?.state).toBe("working");
+      expect(errors.mock.calls.join("\n")).toContain("s_orphan");
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("reports a queue past the page cap once until it clears", async () => {
+    const shared = looping("busy");
+    const stage = shared.def.stages.draft;
+    if (stage?.type === "agent") stage.session = "project";
+    const r = await make({ definitions: new SwapSource(shared) });
+    const ids: string[] = [];
+    for (let i = 0; i < 1001; i++) {
+      ids.push((await r.engine.startRun("busy", { project: "x" })).runId);
+    }
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const capped = () =>
+        errors.mock.calls.filter((c) =>
+          String(c[0]).includes("wait for dispatch"),
+        ).length;
+      await r.engine.tick();
+      expect(capped()).toBe(1);
+      await r.engine.tick();
+      expect(capped()).toBe(1);
+      // Below the cap the condition clears; past it again it is reported again.
+      for (const id of ids.slice(-10)) await r.engine.cancel(id, "test");
+      await r.engine.tick();
+      expect(capped()).toBe(1);
+      for (let i = 0; i < 10; i++) {
+        await r.engine.startRun("busy", { project: "x" });
+      }
+      await r.engine.tick();
+      expect(capped()).toBe(2);
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   it("a deep queue of refused stage runs does not hide one that can run", async () => {

@@ -485,6 +485,17 @@ class SqliteTx implements StoreTx {
     ).map(stageRunFromRow);
   }
 
+  listLaneHolders(): StageRunRow[] {
+    return this.all(
+      `SELECT * FROM stage_runs
+       WHERE state <> 'working'
+         AND ((state = 'completed' AND dispatched_at IS NOT NULL
+               AND adapter_run_id IS NOT NULL)
+              OR abort_run_id IS NOT NULL)
+       ORDER BY created_at ASC, rowid ASC`,
+    ).map(stageRunFromRow);
+  }
+
   inFlightTurnIds(): string[] {
     return this.all(
       `SELECT stage_run_id FROM stage_runs

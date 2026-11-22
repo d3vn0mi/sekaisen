@@ -268,6 +268,12 @@ export interface StoreTx {
    */
   listWorking(): StageRunRow[];
   /**
+   * Every stage run not working that may still hold a harness turn: one
+   * completed with a turn in flight, or one with an abort pending. Oldest
+   * first and unbounded, like `listWorking`.
+   */
+  listLaneHolders(): StageRunRow[];
+  /**
    * Every working agent stage run with a harness turn in flight, by id,
    * oldest first. Ids only and unbounded, so a restart sees all of them.
    */

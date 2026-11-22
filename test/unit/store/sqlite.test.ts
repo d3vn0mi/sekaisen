@@ -779,6 +779,22 @@ describe("scheduler queries", () => {
     });
   });
 
+  it("lists stage runs that may still hold a harness turn", () => {
+    const store = open();
+    store.tx((t) => {
+      seed(t);
+      const add = (id: string, over: Partial<NewStageRun>) =>
+        t.insertStageRun(stageRun({ stageRunId: id, stage: id, ...over }));
+      const turn = { dispatchedAt: 5, adapterRunId: "fr_1" };
+      add("done", { state: "completed", createdAt: 2, ...turn });
+      add("read", { state: "completed", dispatchedAt: null });
+      add("abort", { state: "failed", abortRunId: "fr_2", createdAt: 1 });
+      add("live", { state: "working", ...turn });
+      add("ended", { state: "failed", ...turn });
+      expect(ids(t.listLaneHolders())).toEqual(["abort", "done"]);
+    });
+  });
+
   it("lists turns in flight least recently observed first", () => {
     const store = open();
     store.tx((t) => {
