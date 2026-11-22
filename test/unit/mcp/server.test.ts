@@ -1,10 +1,4 @@
-import {
-  copyFileSync,
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -137,7 +131,6 @@ async function pair() {
     registry: createRegistry(),
     definitions: source,
     dispatch: false,
-    tokenSecret: SECRET,
   });
   cleanup.push(() => host.stop());
   return { host, completion, adapter };
@@ -418,98 +411,77 @@ describe("sekaisen-mcp main", () => {
     };
   }
 
-  it("exits 2 on missing arguments, unknown flags and a short secret", async () => {
+  it("exits 2 on missing arguments and unknown flags", async () => {
     const a = io();
     expect(await main([], a.io)).toBe(2);
-    expect(a.err.join("")).toMatch(/usage: sekaisen-mcp/);
+    expect(a.err.join("")).toMatch(
+      /usage: sekaisen-mcp --store <path> \[--agent <id>\]/,
+    );
     expect(await main(["--bogus"], io().io)).toBe(2);
-    const dir = mkdtempSync(path.join(tmpdir(), "sekaisen-mcp-"));
-    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-    const short = path.join(dir, "secret");
-    writeFileSync(short, "tooshort");
-    const b = io();
-    const code = await main(
-      [
-        "--store",
-        path.join(dir, "s.db"),
-        "--definitions",
-        dir,
-        "--token-secret-file",
-        short,
-      ],
-      b.io,
-    );
-    expect(code).toBe(2);
-    expect(b.err.join("")).toMatch(/at least 32 raw bytes/);
+    for (const gone of ["--definitions", "--token-secret-file"]) {
+      const t = io();
+      expect(await main(["--store", "s.db", gone, "x"], t.io)).toBe(2);
+      expect(t.err.join("")).toMatch(/usage: sekaisen-mcp/);
+    }
   });
 
-  it("warns on a group-readable secret and exits 2 on an unopenable store", async () => {
+  it("exits 2 on an unopenable store", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "sekaisen-mcp-"));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-    const secret = path.join(dir, "secret");
-    writeFileSync(secret, Buffer.from(SECRET), { mode: 0o644 });
     const t = io();
     const code = await main(
-      [
-        "--store",
-        path.join(dir, "missing", "s.db"),
-        "--definitions",
-        dir,
-        "--token-secret-file",
-        secret,
-      ],
+      ["--store", path.join(dir, "missing", "s.db")],
       t.io,
     );
     expect(code).toBe(2);
-    const text = t.err.join("");
-    expect(text).toMatch(/readable by group or others/);
-    expect(text).toMatch(/cannot open the store/);
+    expect(t.err.join("")).toMatch(/cannot open the store/);
   });
 
-  it("warns on a duplicate pipeline id across definition files", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "sekaisen-mcp-"));
-    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-    const defs = path.join(dir, "defs");
-    mkdirSync(defs);
-    const src = path.resolve("test/fixtures/defs/review-loop/pipeline.yaml");
-    copyFileSync(src, path.join(defs, "a.yaml"));
-    copyFileSync(src, path.join(defs, "b.yaml"));
-    const secret = path.join(dir, "secret");
-    writeFileSync(secret, Buffer.from(SECRET), { mode: 0o600 });
+  it("serves with only a store: no secret, no definitions", async () => {
+    const fs = fileStore();
+    const source = new SwapSource(await reviewLoop());
+    const adapter = new FakeAdapter();
+    const host = new Engine({
+      store: fs.open(),
+      adapter,
+      registry: createRegistry(),
+      definitions: source,
+      tokenSecret: SECRET,
+    });
+    cleanup.push(() => host.stop());
+    const { runId } = await host.startRun("review-loop", { topic: "rust" });
+    await host.tick();
     const t = io();
+    const args = ["--store", fs.path, "--agent", "drafter"];
+    const running = main(args, t.io);
+    t.input.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "stage_complete",
+          arguments: {
+            token: lastToken(adapter),
+            outcome: "drafted",
+            fields: { pr_url: "u", summary: "s" },
+          },
+        },
+      })}\n`,
+    );
     t.input.end();
-    const code = await main(
-      [
-        "--store",
-        path.join(dir, "s.db"),
-        "--definitions",
-        defs,
-        "--token-secret-file",
-        secret,
-      ],
-      t.io,
-    );
-    expect(code).toBe(0);
-    expect(t.err.join("")).toMatch(/duplicate pipeline id review-loop/);
+    expect(await running).toBe(0);
+    expect(t.err).toEqual([]);
+    const [reply] = await t.replies.take(1);
+    expect(reply?.result.isError).toBe(false);
+    expect(host.status(runId).run.currentStage).toBe("check");
   });
 
   it("answers a tools/call end to end", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "sekaisen-mcp-"));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-    const secret = path.join(dir, "secret");
-    writeFileSync(secret, Buffer.from(SECRET), { mode: 0o600 });
     const t = io();
-    const running = main(
-      [
-        "--store",
-        path.join(dir, "s.db"),
-        "--definitions",
-        path.resolve("test/fixtures/defs"),
-        "--token-secret-file",
-        secret,
-      ],
-      t.io,
-    );
+    const running = main(["--store", path.join(dir, "s.db")], t.io);
     t.input.write(
       `${JSON.stringify({
         jsonrpc: "2.0",
@@ -531,20 +503,9 @@ describe("sekaisen-mcp main", () => {
   it("serves tools over the streams and exits 0 when stdin closes", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "sekaisen-mcp-"));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-    const secret = path.join(dir, "secret");
-    writeFileSync(secret, Buffer.from(SECRET));
     const t = io();
     const running = main(
-      [
-        "--store",
-        path.join(dir, "s.db"),
-        "--definitions",
-        path.resolve("test/fixtures/defs"),
-        "--token-secret-file",
-        secret,
-        "--agent",
-        "drafter",
-      ],
+      ["--store", path.join(dir, "s.db"), "--agent", "drafter"],
       t.io,
     );
     t.input.write(

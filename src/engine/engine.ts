@@ -111,11 +111,13 @@ export interface EngineOptions {
   dispatch?: boolean;
   /**
    * At least 32 bytes, from which each attempt's completion token is
-   * derived. Keep it out of the store (a host reads it from a file only it
-   * can read). Without it the engine uses a random secret held in memory, so
-   * a turn resent after a restart carries a new token under a new turn key
-   * (logged as `token_rederived`), and a turn the harness had already
-   * started under the old token cannot complete.
+   * derived. Only the dispatching process needs it: completions are checked
+   * against the token hash in the store, so an engine with `dispatch: false`
+   * ignores it. Keep it out of the store (a host reads it from a file only
+   * it can read). Without it a dispatching engine uses a random secret held
+   * in memory, so a turn resent after a restart carries a new token under a
+   * new turn key (logged as `token_rederived`), and a turn the harness had
+   * already started under the old token cannot complete.
    */
   tokenSecret?: Uint8Array;
   /**
@@ -191,7 +193,8 @@ export class Engine {
   private readonly dispatching: boolean;
   private readonly pinned = new PinnedDefinitions();
   private readonly events = new Emitter();
-  private readonly tokenSecret: Uint8Array;
+  /** Set only when dispatching: a completion-only engine derives nothing. */
+  private readonly tokenSecret: Uint8Array | undefined;
   private readonly callTimeoutMs: number;
   private readonly timers: Timers;
   private readonly concurrency: number;
@@ -241,9 +244,11 @@ export class Engine {
         `tokenSecret must be at least ${MIN_TOKEN_SECRET_BYTES} bytes`,
       );
     }
-    this.tokenSecret = o.tokenSecret
-      ? Uint8Array.from(o.tokenSecret)
-      : randomBytes(MIN_TOKEN_SECRET_BYTES);
+    this.tokenSecret = !this.dispatching
+      ? undefined
+      : o.tokenSecret
+        ? Uint8Array.from(o.tokenSecret)
+        : randomBytes(MIN_TOKEN_SECRET_BYTES);
   }
 
   /** Reconciles stored work, then ticks every `tickMs` unless dispatch is off. */
@@ -1062,6 +1067,9 @@ export class Engine {
     // the same key, so a harness that did accept it does not start it twice.
     // The token is derived from the attempt, so the resent message is the
     // same one, and a continuation carries the first turn's token.
+    if (this.tokenSecret === undefined) {
+      throw new Error("a completion-only engine starts no turns");
+    }
     const token = deriveToken(this.tokenSecret, row.idempotencyKey);
     const hash = hashToken(token);
     // Store reads happen out here: a store error propagates and the row is

@@ -204,28 +204,29 @@ continuation; an older note does not.
 
 ### The token secret
 
-Each attempt's token is derived from a secret the host gives the engine as `tokenSecret`: at least 32
-bytes, with only the token's hash stored. **Keep the secret out of the store**, for example in a file
-readable only by the host's user. **Every process that completes stages must use the same secret**: a
-completion arriving at a process with a different secret derives a different token and is refused as
-unknown. Without a `tokenSecret` the engine uses a random one held in memory, so a turn resent after a
-restart cannot reproduce its old token.
+Each attempt's token is derived from a secret the host gives the dispatching engine as
+`tokenSecret`: at least 32 bytes, with only the token's hash stored. **Only the dispatching host
+holds the secret.** Keep it out of the store, for example in a file readable only by the host's
+user. A process that only takes completions never needs it: it hashes the token it is handed and
+looks the hash up in the shared store. Without a `tokenSecret` the dispatching engine uses a random
+one held in memory, so a turn resent after a restart cannot reproduce its old token.
 
 ## Completion-only mode and the MCP server
 
 A harness may take turns in one process while completions arrive in another. Open the engine with
-`dispatch: false` and it starts no turns and runs no tick loop; it only commits completions to the
-shared store. `sekaisen-mcp` is that engine behind a small stdio MCP server that exposes only
-`stage_complete` and `stage_progress`:
+`dispatch: false` and it starts no turns, runs no tick loop and derives no tokens; it only commits
+completions to the shared store, checked against the definitions pinned there. `sekaisen-mcp` is
+that engine behind a small stdio MCP server that exposes only `stage_complete` and
+`stage_progress`:
 
 ```text
-sekaisen-mcp --store <path> --definitions <dir> --token-secret-file <path> [--agent <id>]
+sekaisen-mcp --store <path> [--agent <id>]
 ```
 
-The secret file must hold at least 32 raw bytes and be the same secret the dispatching process uses.
-`--agent` names the agent the connection belongs to, so the engine refuses a completion for another
-agent's stage. A harness that speaks MCP but has no plugin system needs nothing else for completion;
-it still needs an adapter for the required calls.
+It takes no secret and no definitions: an agent-facing process must not hold the secret tokens are
+derived from. `--agent` names the agent the connection belongs to, so the engine refuses a
+completion for another agent's stage. A harness that speaks MCP but has no plugin system needs
+nothing else for completion; it still needs an adapter for the required calls.
 
 The engine itself (`Engine`) is not yet exported from the package root; that arrives with the release.
 

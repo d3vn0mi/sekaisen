@@ -1,21 +1,16 @@
 #!/usr/bin/env node
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import path from "node:path";
+import { realpathSync } from "node:fs";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import type { HarnessAdapter } from "../adapter/types.js";
 import { type DefinitionSource, Engine } from "../engine/engine.js";
-import { type LoadedDefinition, loadDefinition } from "../format/load.js";
 import { createRegistry } from "../host/registry.js";
 import { openSqliteStore } from "../store/sqlite.js";
 import type { Store } from "../store/types.js";
 import { createMcpServer } from "./server.js";
 
-export const MCP_USAGE =
-  "sekaisen-mcp --store <path> --definitions <dir> --token-secret-file <path> [--agent <id>]";
-
-const MIN_SECRET_BYTES = 32;
+export const MCP_USAGE = "sekaisen-mcp --store <path> [--agent <id>]";
 
 export interface McpIo {
   err(text: string): void;
@@ -32,43 +27,11 @@ const noHarness: HarnessAdapter = {
   deliver: () => Promise.reject(new Error("completion-only")),
 };
 
-/** The YAML files under `dir`: `<dir>/*.yaml` and `<dir>/*\/pipeline.yaml`. */
-function definitionFiles(dir: string): string[] {
-  const files: string[] = [];
-  for (const name of readdirSync(dir).sort()) {
-    const full = path.join(dir, name);
-    if (statSync(full).isDirectory()) {
-      const nested = path.join(full, "pipeline.yaml");
-      try {
-        if (statSync(nested).isFile()) files.push(nested);
-      } catch {
-        // no pipeline.yaml in this directory
-      }
-    } else if (name.endsWith(".yaml")) {
-      files.push(full);
-    }
-  }
-  return files;
-}
-
-async function loadSource(dir: string, io: McpIo): Promise<DefinitionSource> {
-  const defs = new Map<string, LoadedDefinition>();
-  for (const file of definitionFiles(dir)) {
-    try {
-      const loaded = await loadDefinition(file);
-      const id = loaded.def.id;
-      if (defs.has(id)) {
-        io.err(
-          `sekaisen-mcp: duplicate pipeline id ${id} in ${file}; the later file wins\n`,
-        );
-      }
-      defs.set(id, loaded);
-    } catch (x) {
-      io.err(`sekaisen-mcp: skipped ${file}: ${(x as Error).message}\n`);
-    }
-  }
-  return { current: (id) => defs.get(id) };
-}
+/**
+ * Completions are checked against the definitions pinned in the store, so
+ * this process loads none; it never starts a run.
+ */
+const noDefinitions: DefinitionSource = { current: () => undefined };
 
 /** Serves the completion tools until the input closes; returns the exit code. */
 export async function main(argv: string[], io: McpIo): Promise<number> {
@@ -78,8 +41,6 @@ export async function main(argv: string[], io: McpIo): Promise<number> {
       args: argv,
       options: {
         store: { type: "string" },
-        definitions: { type: "string" },
-        "token-secret-file": { type: "string" },
         agent: { type: "string" },
         help: { type: "boolean" },
       },
@@ -94,35 +55,8 @@ export async function main(argv: string[], io: McpIo): Promise<number> {
     return 0;
   }
   const store = values.store as string | undefined;
-  const definitions = values.definitions as string | undefined;
-  const secretFile = values["token-secret-file"] as string | undefined;
-  if (!store || !definitions || !secretFile) {
+  if (!store) {
     io.err(`usage: ${MCP_USAGE}\n`);
-    return 2;
-  }
-  let secret: Buffer;
-  try {
-    secret = readFileSync(secretFile);
-    if ((statSync(secretFile).mode & 0o077) !== 0) {
-      io.err(
-        `sekaisen-mcp: warning: ${secretFile} is readable by group or others; chmod 600 it\n`,
-      );
-    }
-  } catch (x) {
-    io.err(`cannot read the token secret file: ${(x as Error).message}\n`);
-    return 2;
-  }
-  if (secret.byteLength < MIN_SECRET_BYTES) {
-    io.err(
-      `the token secret file must hold at least ${MIN_SECRET_BYTES} raw bytes (${secretFile} holds ${secret.byteLength})\n`,
-    );
-    return 2;
-  }
-  let source: DefinitionSource;
-  try {
-    source = await loadSource(definitions, io);
-  } catch (x) {
-    io.err(`cannot read the definitions directory: ${(x as Error).message}\n`);
     return 2;
   }
   let db: Store;
@@ -136,9 +70,8 @@ export async function main(argv: string[], io: McpIo): Promise<number> {
     store: db,
     adapter: noHarness,
     registry: createRegistry(),
-    definitions: source,
+    definitions: noDefinitions,
     dispatch: false,
-    tokenSecret: secret,
   });
   try {
     const server = createMcpServer({
