@@ -73,8 +73,9 @@ export interface EngineOptions {
    * At least 32 bytes, from which each attempt's completion token is
    * derived. Keep it out of the store (a host reads it from a file only it
    * can read). Without it the engine uses a random secret held in memory, so
-   * a turn resent after a restart carries a new token and a turn that the
-   * harness had already started under the old one cannot complete.
+   * a turn resent after a restart carries a new token under a new turn key
+   * (logged as `token_rederived`), and a turn the harness had already
+   * started under the old token cannot complete.
    */
   tokenSecret?: Uint8Array;
 }
@@ -123,7 +124,11 @@ export class Engine {
     this.clock = o.clock ?? systemClock;
     this.tickMs = o.tickMs ?? DEFAULT_TICK_MS;
     this.dispatching = o.dispatch !== false;
-    if (o.tokenSecret && o.tokenSecret.length < MIN_TOKEN_SECRET_BYTES) {
+    if (
+      o.tokenSecret !== undefined &&
+      (!(o.tokenSecret instanceof Uint8Array) ||
+        o.tokenSecret.byteLength < MIN_TOKEN_SECRET_BYTES)
+    ) {
       throw new Error(
         `tokenSecret must be at least ${MIN_TOKEN_SECRET_BYTES} bytes`,
       );
@@ -465,16 +470,20 @@ export class Engine {
     // the same key, so a harness that did accept it does not start it twice.
     // The token is derived from the attempt, so the resent message is the
     // same one, and a continuation carries the first turn's token.
-    const unrecorded = row.dispatchSeq > 0 && row.adapterRunId === null;
-    const dispatchSeq = unrecorded ? row.dispatchSeq : row.dispatchSeq + 1;
     const token = deriveToken(this.tokenSecret, row.idempotencyKey);
     const hash = hashToken(token);
-    // The hash is set when the attempt is first dispatched. It differs only
-    // when the secret changed (a restart without a configured secret); the
-    // new hash then replaces it, so this turn can complete.
+    // The hash is set when the attempt is first dispatched. A different one
+    // means the secret changed (a restart without a configured secret). A
+    // turn the harness may already hold carries the old token, so the new
+    // brief goes out under a new turn key rather than being deduplicated
+    // into that turn, and the change is logged.
+    const rederived = row.tokenHash !== null && row.tokenHash !== hash;
+    const unrecorded = row.dispatchSeq > 0 && row.adapterRunId === null;
+    const dispatchSeq =
+      unrecorded && !rederived ? row.dispatchSeq : row.dispatchSeq + 1;
     const patch: StageRunPatch = {};
     if (row.tokenHash !== hash) patch.tokenHash = hash;
-    if (!unrecorded) {
+    if (dispatchSeq !== row.dispatchSeq) {
       patch.dispatchSeq = dispatchSeq;
       patch.adapterRunId = null;
     }
@@ -485,6 +494,19 @@ export class Engine {
         patch,
       );
       if (!ok) return undefined;
+    }
+    if (rederived) {
+      t.appendTransition({
+        runId: row.runId,
+        stageRunId,
+        fromState: row.state,
+        toState: row.state,
+        event: "token_rederived",
+        outcome: null,
+        actor: ENGINE_ACTOR,
+        at: this.clock.now(),
+        detail: { fromSeq: row.dispatchSeq, toSeq: dispatchSeq },
+      });
     }
     const text =
       row.turnsUsed === 0

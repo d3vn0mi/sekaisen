@@ -391,6 +391,18 @@ describe("per-attempt tokens", () => {
           tokenSecret: new Uint8Array(31),
         }),
     ).toThrow(/32 bytes/);
+    for (const bad of ["x".repeat(64), new ArrayBuffer(64)]) {
+      expect(
+        () =>
+          new Engine({
+            store: r.store,
+            adapter: r.adapter,
+            registry: createRegistry(),
+            definitions: r.source,
+            tokenSecret: bad as unknown as Uint8Array,
+          }),
+      ).toThrow("tokenSecret must be at least 32 bytes");
+    }
   });
 
   it("a new engine with the same secret resends a byte-identical brief after a crash between steps", async () => {
@@ -432,7 +444,52 @@ describe("per-attempt tokens", () => {
     ).toMatchObject({ ok: true });
   });
 
-  it("a new engine with another secret re-derives the token so the new turn can complete", async () => {
+  it("a new engine with another secret re-sends under a new turn key and logs it", async () => {
+    const r = await make({ tokenSecret: secret });
+    const { runId } = await r.engine.startRun("review-loop", { topic: "rust" });
+    // Step 1 commits and the harness ACCEPTS the turn, then the engine dies
+    // before step 3 records it.
+    r.adapter.beforeStart = () => {
+      throw new Error("crash");
+    };
+    await r.engine.tick();
+    r.adapter.beforeStart = undefined;
+    const sent = r.adapter.calls[0];
+    if (!sent) throw new Error("no turn was sent");
+    expect(await r.adapter.startTurn(sent)).toEqual({ runId: "fr_1" });
+    const oldToken = tokenOf(sent.message);
+
+    const restarted = new Engine({
+      store: r.store,
+      adapter: r.adapter,
+      registry: createRegistry(),
+      clock: r.clock,
+      definitions: r.source,
+      tokenSecret: new Uint8Array(32).fill(9),
+    });
+    await restarted.tick();
+    const resent = r.adapter.calls.at(-1);
+    expect(resent?.idempotencyKey).toBe(`${runId}:draft:1:2`);
+    const token = tokenOf(resent?.message ?? "");
+    expect(token).not.toBe(oldToken);
+    const view = restarted.status(runId);
+    expect(view.live?.adapterRunId).toBe("fr_2");
+    expect(view.live?.dispatchSeq).toBe(2);
+    expect(view.live?.tokenHash).toBe(hashToken(token));
+    const rederived = view.transitions.find(
+      (t) => t.event === "token_rederived",
+    );
+    expect(rederived?.detail).toEqual({ fromSeq: 1, toSeq: 2 });
+    expect(
+      await restarted.complete({
+        token,
+        outcome: "blocked",
+        fields: { reason: "r" },
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
+  it("the same secret re-sends under the same key without re-deriving", async () => {
     const r = await make({ tokenSecret: secret });
     const { runId } = await r.engine.startRun("review-loop", { topic: "rust" });
     r.adapter.beforeStart = () => {
@@ -446,18 +503,12 @@ describe("per-attempt tokens", () => {
       registry: createRegistry(),
       clock: r.clock,
       definitions: r.source,
+      tokenSecret: Uint8Array.from(secret),
     });
     await restarted.tick();
-    const token = tokenOf(r.adapter.calls[1]?.message ?? "");
-    expect(token).not.toBe(tokenOf(r.adapter.calls[0]?.message ?? ""));
-    expect(restarted.status(runId).live?.tokenHash).toBe(hashToken(token));
-    expect(
-      await restarted.complete({
-        token,
-        outcome: "blocked",
-        fields: { reason: "r" },
-      }),
-    ).toMatchObject({ ok: true });
+    expect(r.adapter.calls[1]?.idempotencyKey).toBe(`${runId}:draft:1`);
+    const events = restarted.status(runId).transitions.map((t) => t.event);
+    expect(events).not.toContain("token_rederived");
   });
 
   it("a continuation turn carries the same token as the first turn", async () => {
