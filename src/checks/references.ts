@@ -47,6 +47,7 @@ function dominators(loaded: LoadedDefinition): Map<string, Set<string>> {
 export function referenceFindings(
   loaded: LoadedDefinition,
   registry: HostRegistry,
+  unregisteredAs: "error" | "warning" = "error",
 ): Finding[] {
   const { def } = loaded;
   const out: Finding[] = [];
@@ -54,6 +55,9 @@ export function referenceFindings(
     const f: Finding = { check: "references", severity: "error", message };
     if (stage !== undefined) f.stage = stage;
     out.push(f);
+  };
+  const warn = (message: string, stage: string): void => {
+    out.push({ check: "references", severity: "warning", stage, message });
   };
   const exists = (id: string): boolean => id in def.stages;
 
@@ -102,42 +106,48 @@ export function referenceFindings(
     id: string,
   ) => {
     if (!known.has(name)) {
-      err(`${kind} ${name} is not registered by the host`, id);
+      (unregisteredAs === "error" ? err : warn)(
+        `${kind} ${name} is not registered by the host`,
+        id,
+      );
     }
   };
   const doms = dominators(loaded);
+  // One scan for every text rendered at run time: briefs and gate prompts.
+  const scan = (text: string, label: string, id: string): void => {
+    const seen = new Set<string>();
+    for (const m of text.matchAll(PLACEHOLDER)) {
+      const name = (m[1] ?? "").trim();
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const head = name.split(".")[0] ?? "";
+      const shown = `${label}: placeholder {{${name}}}`;
+      if (head === "inputs" && name.includes(".")) continue;
+      if (!name.includes(".") || !exists(head)) {
+        err(`${shown} names neither inputs nor a stage`, id);
+      } else if (head !== id && doms.get(id) && !doms.get(id)?.has(head)) {
+        warn(
+          `${shown} names stage ${head}, which is not on every path to ${id}`,
+          id,
+        );
+      }
+    }
+  };
   for (const [id, stage] of Object.entries(def.stages)) {
     if (stage.type === "check") {
       registered("check", stage.check, registry.checks, id);
     } else if (stage.type === "action") {
       registered("action", stage.action, registry.actions, id);
-    } else if (stage.type === "gate" && stage.poll) {
-      registered("fact", stage.poll.fact, registry.facts, id);
+    } else if (stage.type === "gate") {
+      if (stage.poll) registered("fact", stage.poll.fact, registry.facts, id);
+      if (stage.prompt !== undefined) scan(stage.prompt, "gate prompt", id);
     } else if (stage.type === "agent") {
       const text = loaded.briefs[stage.brief];
       if (text === undefined) {
         err(`brief ${stage.brief} does not exist`, id);
         continue;
       }
-      const seen = new Set<string>();
-      for (const m of text.matchAll(PLACEHOLDER)) {
-        const name = (m[1] ?? "").trim();
-        if (seen.has(name)) continue;
-        seen.add(name);
-        const head = name.split(".")[0] ?? "";
-        const shown = `brief ${stage.brief}: placeholder {{${name}}}`;
-        if (head === "inputs" && name.includes(".")) continue;
-        if (!name.includes(".") || !exists(head)) {
-          err(`${shown} names neither inputs nor a stage`, id);
-        } else if (head !== id && doms.get(id) && !doms.get(id)?.has(head)) {
-          out.push({
-            check: "references",
-            severity: "warning",
-            stage: id,
-            message: `${shown} names stage ${head}, which is not on every path to ${id}`,
-          });
-        }
-      }
+      scan(text, `brief ${stage.brief}`, id);
     }
   }
   return out;

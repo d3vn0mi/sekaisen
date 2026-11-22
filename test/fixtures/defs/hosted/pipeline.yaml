@@ -1,0 +1,12 @@
+format: 1
+id: hosted
+version: 1
+start: c
+stages:
+  c:
+    type: check
+    check: demo.ready
+    outcomes:
+      yes: done
+      no: done
+  done: { type: end, status: completed }

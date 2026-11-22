@@ -1,0 +1,21 @@
+format: 1
+id: unbounded
+version: 1
+start: a
+stages:
+  a:
+    type: agent
+    agent: drafter
+    session: run
+    brief: briefs/a.md
+    outcomes:
+      ok: { next: b }
+  b:
+    type: agent
+    agent: checker
+    session: run
+    brief: briefs/a.md
+    outcomes:
+      bad: { next: a }
+      good: { next: done }
+  done: { type: end, status: completed }

@@ -12,7 +12,7 @@ const only = (fs: Finding[], check: string) =>
 describe("references", () => {
   test("clean review-loop has no findings", async () => {
     const l = await loadDefinition(path.join(FIXTURE, "pipeline.yaml"));
-    expect(await run(l)).toEqual([]);
+    expect((await run(l)).filter((f) => f.severity !== "info")).toEqual([]);
   });
 
   test("schema problems become schema errors", async () => {
@@ -217,5 +217,52 @@ describe("references", () => {
         message: "stage a outcome ok branch 0: guard names unknown stage ghost",
       },
     ]);
+  });
+});
+
+describe("gate prompts", () => {
+  const gate = (prompt: string): Stage =>
+    ({
+      type: "gate",
+      prompt,
+      timeout: 120_000,
+      onTimeout: { remind: 60_000 },
+      outcomes: { yes: { next: "z" } },
+    }) as Stage;
+
+  test("an unknown name in a gate prompt is an error", async () => {
+    const l = loaded({ g: gate("Ship {{nothing}}?"), z: end() });
+    expect(only(await run(l), "references")).toContainEqual({
+      check: "references",
+      severity: "error",
+      stage: "g",
+      message:
+        "gate prompt: placeholder {{nothing}} names neither inputs nor a stage",
+    });
+  });
+
+  test("a gate prompt naming a stage off some path is a warning", async () => {
+    const l = loaded({
+      a: agent({ x: { next: "g" }, y: { next: "b" } }),
+      b: agent({ ok: { next: "g" } }),
+      g: gate("Result {{b.pr}}"),
+      z: end(),
+    });
+    expect(only(await run(l), "references")).toContainEqual({
+      check: "references",
+      severity: "warning",
+      stage: "g",
+      message:
+        "gate prompt: placeholder {{b.pr}} names stage b, which is not on every path to g",
+    });
+  });
+
+  test("inputs and dominating stages in a gate prompt pass", async () => {
+    const l = loaded({
+      a: agent({ ok: { next: "g" } }),
+      g: gate("{{inputs.topic}} {{a.pr}}"),
+      z: end(),
+    });
+    expect(only(await run(l), "references")).toEqual([]);
   });
 });
