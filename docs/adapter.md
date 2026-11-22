@@ -27,8 +27,8 @@ optional.
 
 The engine calls `capabilities`, `openSession`, `startTurn`, `readRunOutcome` and `abortTurn`. It does
 not yet call `deliver`, `schedule` or `guardToolCall`, nor `capabilities().agentTools`; these are for
-the host's own wiring (see below). An adapter that omits `abortTurn` loses only that feature. Without `abortTurn` it reports
-`canAbort: false`, and a timed-out turn is retired by its token instead of being stopped.
+the host's own wiring (see below). An adapter that omits `abortTurn` loses only that feature; see
+[`abortTurn`](#abortturnrunid-optional).
 
 ### `capabilities()`
 
@@ -130,16 +130,20 @@ spent, and it is dispatched again once the pause lifts.
 - **Under `providers: fleet` (the default)**, any live refusal holds every fleet run. Report a
   refusal only when the harness's whole fallback chain failed, and always set `runtime` on it.
 - **Under `providers: subscription` or `{ allow: [...] }`**, `runtime.provider` on every ended turn
-  must be accurate. A turn that ended `ok` on a provider outside the allowed set, without
-  `stage_complete`, pauses later dispatches through a policy limit and is not retried; one that did
-  call `stage_complete` is accepted.
+  must be accurate. Every turn that ended `ok` on a provider outside the allowed set pauses later
+  dispatches through a policy limit for one hour, whether or not it completed. One that called
+  `stage_complete` is still accepted, and the run moves on. One that did not is `usage_limited`: it
+  costs no retry and waits for the pause. If that turn left a fresh `stage_progress` note, and the
+  stage has turns and time left, it keeps its turn count and continues from the note once the pause
+  lifts; otherwise the turn is not counted, the attempt's deadline starts again, and the same turn
+  is dispatched again once the pause lifts.
 
 ### `abortTurn(runId)` (optional)
 
-Stops a turn that is still running and returns whether it did. Without it, set
-`canAbort: false`. The engine calls it after retiring the
+Stops a turn that is still running and returns whether it did. The engine calls it after retiring the
 turn's token (on a deadline, a retry or a cancel), so a late turn cannot complete the stage even when
-the abort fails. It retries a failed abort with backoff.
+the abort fails, and it retries a failed abort with backoff. An adapter without `abortTurn` reports
+`canAbort: false`; its timed-out turns are then retired by their token and left to finish.
 
 ### `deliver(sessionKey, message)`
 
