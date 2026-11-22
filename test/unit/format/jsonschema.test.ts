@@ -3,6 +3,7 @@ import {
   checkSchema,
   fieldsShorthandToSchema,
   type JsonSchema,
+  MAX_VALIDATION_STEPS,
   SUPPORTED_KEYWORDS,
   validateJson,
 } from "../../../src/format/jsonschema.js";
@@ -331,5 +332,41 @@ describe("checkSchema and guards", () => {
     let s: JsonSchema = { type: "string" };
     for (let i = 0; i < 70; i++) s = { items: s };
     expect(() => checkSchema(s)).toThrow(/schema nesting deeper than 64/);
+  });
+});
+
+describe("step budget", () => {
+  test("an exponential oneOf chain through $defs is cut off", () => {
+    const defs: Record<string, JsonSchema> = {};
+    for (let i = 0; i < 22; i++) {
+      defs[`d${i}`] =
+        i === 21
+          ? { type: "string" }
+          : {
+              oneOf: [
+                { $ref: `#/$defs/d${i + 1}` },
+                { $ref: `#/$defs/d${i + 1}` },
+              ],
+            };
+    }
+    const schema: JsonSchema = { $defs: defs, $ref: "#/$defs/d0" };
+    const start = Date.now();
+    expect(() => validateJson(schema, "x")).toThrow(
+      `schema evaluation too large (over ${MAX_VALIDATION_STEPS} steps)`,
+    );
+    expect(Date.now() - start).toBeLessThan(1000);
+  });
+
+  test("a normal schema over 1000 objects still validates", () => {
+    const schema: JsonSchema = {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { id: { type: "integer" }, name: { type: "string" } },
+        required: ["id"],
+      },
+    };
+    const value = Array.from({ length: 1000 }, (_, id) => ({ id, name: "n" }));
+    expect(validateJson(schema, value)).toEqual([]);
   });
 });

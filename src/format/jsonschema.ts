@@ -102,6 +102,10 @@ const TYPE_NAMES = [
   "array",
 ];
 const MAX_DEPTH = 64;
+/** Upper bound on schema visits for one validateJson call. */
+export const MAX_VALIDATION_STEPS = 100_000;
+// Validation is synchronous, so one module-level counter per call is safe.
+let steps = 0;
 const NON_NEGATIVE_INTEGER_KEYWORDS = [
   "minLength",
   "maxLength",
@@ -310,6 +314,11 @@ function check(
   if (depth > MAX_DEPTH) {
     throw new Error(`${path}: schema nesting deeper than ${MAX_DEPTH}`);
   }
+  if (++steps > MAX_VALIDATION_STEPS) {
+    throw new Error(
+      `${path}: schema evaluation too large (over ${MAX_VALIDATION_STEPS} steps)`,
+    );
+  }
   // Same value, same schema position: refs followed so far stay active.
   const same = (s: JsonSchema, sub: string[]) =>
     check(s, value, path, root, sub, depth + 1, active);
@@ -438,6 +447,7 @@ export function validateJson(
 ): string[] {
   checkSchema(schema);
   const errors: string[] = [];
+  steps = 0;
   check(schema, value, path, schema, errors, 0, []);
   return errors;
 }
