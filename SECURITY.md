@@ -44,8 +44,10 @@ Please include:
 Everything an agent sends to the engine is treated as untrusted input to typed completion. An agent
 can choose among the outcomes its stage declares, and nothing more. As designed for 0.1:
 
-- **Completion tokens are scoped.** Each attempt of each stage run gets its own random token. Only
-  its SHA-256 hash is stored. A retry, a deadline or a cancellation retires it, and a call with a
+- **Completion tokens are scoped.** Each attempt of each stage run gets its own token, derived with
+  HMAC-SHA-256 from a secret only the dispatching host holds and the attempt's idempotency key. Only
+  its SHA-256 hash is stored, and a process that only takes completions, such as `sekaisen-mcp`,
+  never holds the secret. A retry, a deadline or a cancellation retires a token, and a call with a
   retired token is refused and logged, never applied.
 - **The caller is checked.** Where the harness reports who is calling, `stage_complete` and
   `stage_progress` accept a call only from the agent the stage was dispatched to.

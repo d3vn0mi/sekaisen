@@ -1,10 +1,10 @@
 # sekaisen design overview
 
 This is the design of sekaisen as it stands before 0.1: the ideas, the two state machines, the
-completion contract and the interfaces between the engine, its host and the harness. It describes
-what is being built, so details can still change before 0.1 ships. Once the code lands, the format
-reference (`docs/format.md`) and the adapter reference (`docs/adapter.md`) take over the details,
-and this page stays the overview.
+completion contract and the interfaces between the engine, its host and the harness. Details can
+still change before 0.1 ships. The format reference ([`format.md`](format.md)) and the adapter
+reference ([`adapter.md`](adapter.md)) hold the details and are the contract; where this overview
+and they differ, they win.
 
 ## Contents
 
@@ -48,8 +48,8 @@ sekaisen moves those rules out of the prompts and into a file the engine reads:
 | **Stage** | One step of a pipeline: an agent's work, a gate, a check, an action, a wait or an end |
 | **Outcome** | A named way a stage can end, with an optional schema for the fields that come with it |
 | **Run** | One execution of a pipeline, with its inputs, moving through the stage graph |
-| **Stage run** | One visit of a run to one stage. A loop that returns to a stage creates a new stage run |
-| **Attempt** | One try of a stage run. A retry is a new attempt, with a fresh token and a fresh deadline |
+| **Stage run** | One attempt of a run at one stage. Each visit to a stage creates one, and each retry within a visit another |
+| **Attempt** | One try at a stage. Each attempt is its own stage run, with its own idempotency key, its own token and its own deadline |
 | **Turn** | One unit of agent work in the harness: a prompt in, tool calls, a reply out |
 | **Role** | The `agent:` name in a definition. The adapter resolves it to an agent in the harness |
 | **Brief** | The Markdown template the engine renders into the message that starts an agent's turn |
@@ -132,8 +132,10 @@ parsed form of every version it has seen, so a change applies to new runs only.
 ### The run
 
 A run moves through the pipeline's own graph: the stages and the transitions the definition
-declares. Its status is one of `working`, `input_required` (its live stage is a gate), `completed`,
-`failed` or `canceled`. Only an `end` stage, or a cancellation, ends a run.
+declares. Its status is one of `working`, `input_required` (its live stage is an operator gate),
+`completed`, `failed` or `canceled`. An `end` stage ends a run, and so does a cancellation. The
+engine also fails a run it cannot move on: a guard that cannot be evaluated, a stage that can never
+run, or an exhausted stage with nowhere to go.
 
 ### The stage run
 
@@ -143,22 +145,25 @@ translation:
 
 | State | A2A task state | Meaning |
 |---|---|---|
-| `submitted` | `submitted` | Created, waiting for the scheduler to admit it |
-| `working` | `working` | A turn is in flight, or the stage is between continuation turns |
-| `input_required` | `input-required` | A gate is waiting on a person or a polled fact |
+| `submitted` | `submitted` | Created, waiting to be dispatched or run; also between continuation turns |
+| `working` | `working` | A turn is in flight, a wait is running, or a poll gate is polling |
+| `input_required` | `input-required` | An operator gate is waiting on a person |
 | `completed` | `completed` | Ended with one of its declared outcomes |
-| `failed` | `failed` | Ended with an engine-classified failure, after its retries |
-| `canceled` | `canceled` | Canceled, on its own or with its run |
-| `rejected` | `rejected` | Refused by the engine before dispatch |
+| `failed` | `failed` | Ended with an engine-classified ending, or a gate timed out. A retry is a new stage run |
+| `canceled` | `canceled` | Canceled with its run |
+| `rejected` | `rejected` | Refused before it could run, such as a brief that cannot be rendered |
 
 The allowed moves:
 
 | From | To |
 |---|---|
 | `submitted` | `working`, `input_required`, `completed`, `failed`, `canceled`, `rejected` |
-| `working` | `working` (a continuation turn), `submitted` (a retry, or a pause for a usage limit), `completed`, `failed`, `canceled` |
+| `working` | `submitted` (a continuation turn is due, or a usage-limit pause holds the attempt), `completed`, `failed`, `canceled` |
 | `input_required` | `completed`, `failed`, `canceled` |
 | `completed`, `failed`, `canceled`, `rejected` | none: these are final |
+
+A retry never moves a stage run back: the failed attempt stays `failed` and the retry is a new stage
+run, `submitted`, in the same visit.
 
 Any other move is a bug, and the engine refuses it.
 
@@ -168,14 +173,17 @@ Any other move is a bug, and the engine refuses it.
 
 When the scheduler admits a `submitted` agent stage run, the engine:
 
-1. mints a random completion token for this stage run and this attempt, and stores only its hash;
-2. computes the idempotency key `<run>:<stage>:<attempt>`;
+1. takes the attempt's idempotency key, `<run>:<stage>:<attempt>`, fixed when the stage run was
+   created;
+2. derives the attempt's completion token from the host's secret and that key, so the same attempt
+   always gets the same token, and records the dispatch with only the token's hash;
 3. renders the brief;
 4. calls the adapter's `startTurn` with the role, the session, the message, the turn cap, the
-   idempotency key and the completion tools;
+   turn's key and the completion tools;
 5. records the adapter's run id and moves the stage run to `working`, in one transaction.
 
-Then it returns. Nothing in the engine waits on the turn.
+Then it returns. Nothing in the engine waits on the turn. A crash between steps 2 and 5 resends the
+same message under the same key, so a harness that already started the turn does not start it again.
 
 ### The completion contract
 
@@ -190,7 +198,8 @@ The engine checks, in this order:
 1. the token belongs to a live stage run and its current attempt;
 2. the caller is the agent the stage was dispatched to, where the harness reports the caller;
 3. the outcome is one the stage declares;
-4. `fields` is an object, within the size limit, and validates against that outcome's schema.
+4. `fields` is an object, within the size limit together with any `artifacts`, and validates against
+   that outcome's schema.
 
 On success it commits the transition and advances the run at once, without waiting for the next tick.
 On failure it returns a precise error naming what was wrong, such as the declared outcomes, and
@@ -212,12 +221,13 @@ ending without `stage_complete`:
 | `no_result` | The turn ended normally, without completing and without a fresh progress note |
 | `continue` | The turn ended normally after `stage_progress`: the stage wants another turn |
 | `turn_error` | The turn failed, was killed or hit the harness's turn cap |
-| `usage_limited` | The provider refused the turn because a usage limit was hit |
+| `usage_limited` | The provider refused the turn because a usage limit was hit, or the turn ran on a provider the pipeline does not allow |
 | `timeout` | The attempt's deadline passed |
 | `lost` | After a restart, the harness no longer knows the turn |
 
 Each ending goes to the retry policy, except two. `continue` leads to a continuation turn.
-`usage_limited` returns the stage run to `submitted` without using a retry, and pauses that provider.
+`usage_limited` returns the stage run to `submitted` without using a retry, and pauses that provider,
+or the pipeline's provider policy.
 
 When a deadline passes, the engine cannot always stop the turn, since not every harness can abort
 one. So it retires the token first: whatever the late turn does, it can no longer complete the stage.
@@ -249,7 +259,9 @@ Everything the engine knows is in its store. On start, before its first tick, it
 
 - if the adapter reports that the turn ended, the engine classifies the ending as above;
 - if the harness no longer knows the turn, the attempt ends as `lost`, its token is retired and the
-  retry policy applies, with the same idempotency key so the harness can drop a duplicate;
+  retry policy applies: a retry is a new attempt, with a new idempotency key and a new token;
+- if the engine recorded a dispatch but not the turn it started, it sends the same message again
+  under the same key, so the harness can drop a duplicate;
 - gates and waits resume from their stored deadlines.
 
 Every reconciliation decision is written to the transition log, with the actor `engine:reconcile`.
@@ -286,7 +298,7 @@ project is named after.
 
 | Check | What it verifies |
 |---|---|
-| **Schema** | The file validates against the JSON Schema for its `format` |
+| **Schema** | The file validates against the JSON Schema for its `format`, and every id and name is an identifier |
 | **References** | Every `next` target exists. Every `check`, `action` and polled fact is registered by the host. Every brief exists, and every placeholder names an input or a stage |
 | **Graph** | Every stage is reachable from `start`, every stage that is not an end has a way out, an end is reachable from every stage, and every outcome has a `next` |
 | **Termination** | Every cycle passes through a gate, or through a branch whose guard bounds it, such as `count(check.fail) < 3` |
@@ -336,11 +348,12 @@ seven calls do the work. Four are needed by every adapter, and three are optiona
 ```ts
 interface HarnessAdapter {
   // What the harness allows: its turn cap, how many turns may run at once, whether it can abort one,
-  // and, where it can say, which tools an agent has.
+  // which provider counts as the subscription, and, where it can say, which tools an agent has.
   capabilities(): Promise<{
     turnCapMs: number;
     maxConcurrent: number;
     canAbort: boolean;
+    subscriptionProvider?: string;
     agentTools?(agent: string): Promise<string[]>;
   }>;
 
@@ -373,14 +386,15 @@ interface HarnessAdapter {
   // Optional: stop a turn that is still running.
   abortTurn?(runId: string): Promise<boolean>;
 
-  // Send a message into a session without starting a stage, such as a gate reminder.
+  // Send a message into a session without starting a stage. The engine does not call it yet; a
+  // host may use it for its own notifications.
   deliver(sessionKey: string, message: string): Promise<void>;
 
   // Optional: let the host's own loop drive the engine's tick.
   schedule?(spec: string, fn: () => void): { dispose(): void };
 
   // Optional: inspect tool calls before they run, for extra hardening.
-  guardToolCall?(fn: (call: unknown) => "allow" | { deny: string }): void;
+  guardToolCall?(fn: (call: { agent: string; tool: string }) => "allow" | { deny: string }): void;
 }
 ```
 
@@ -392,8 +406,9 @@ conformance suite.
 
 A harness with a plugin system registers `stage_complete` and `stage_progress` natively, through its
 adapter. For a harness that speaks MCP and has no plugin system, sekaisen ships a small stdio MCP
-server that exposes only those two tools, backed by the same handlers and the same store. The
-completion contract is the same either way.
+server that exposes only those two tools, backed by the same handlers and the same store. It holds
+no token secret: it checks a token by its hash in the store. The completion contract is the same
+either way.
 
 ## The host
 

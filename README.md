@@ -162,18 +162,18 @@ newer attempt.
 
 ### The stage-run lifecycle
 
-A run moves through the pipeline's graph. Each stage run moves through one fixed lifecycle, using
-the [A2A](https://a2a-protocol.org/) task states:
+A run moves through the pipeline's graph. Each attempt at a stage is a stage run, and each stage run
+moves through one fixed lifecycle, using the [A2A](https://a2a-protocol.org/) task states:
 
 | State | A2A task state | Meaning |
 |---|---|---|
-| `submitted` | `submitted` | Created, waiting for the scheduler to admit it |
-| `working` | `working` | A turn is in flight, or the stage is between continuation turns |
-| `input_required` | `input-required` | A gate is waiting on a person or a polled fact |
+| `submitted` | `submitted` | Created, waiting to be dispatched or run; also between continuation turns |
+| `working` | `working` | A turn is in flight, a wait is running, or a poll gate is polling |
+| `input_required` | `input-required` | An operator gate is waiting on a person |
 | `completed` | `completed` | Ended with one of its declared outcomes |
-| `failed` | `failed` | Ended with an engine-classified failure, after its retries |
-| `canceled` | `canceled` | Canceled, on its own or with its run |
-| `rejected` | `rejected` | Refused by the engine before dispatch |
+| `failed` | `failed` | Ended with an engine-classified ending, or a gate timed out. A retry is a new stage run |
+| `canceled` | `canceled` | Canceled with its run |
+| `rejected` | `rejected` | Refused before it could run, such as a brief that cannot be rendered |
 
 A run's own status uses the same words: `working`, `input_required`, `completed`, `failed` and
 `canceled`. [docs/design.md](docs/design.md) covers the rest: the stage types, the completion
