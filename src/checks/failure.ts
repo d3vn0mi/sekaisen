@@ -1,6 +1,6 @@
 import type { LoadedDefinition } from "../format/load.js";
-import { failedEnd } from "../format/rules.js";
-import type { RetryEnding, Stage } from "../format/types.js";
+import { failedEnd, STAGE_ENDINGS } from "../format/rules.js";
+import type { Stage } from "../format/types.js";
 import type { Finding } from "./index.js";
 
 /**
@@ -22,12 +22,6 @@ export function canFail(stage: Stage): boolean {
       return false;
   }
 }
-
-/** The engine-classified endings an attempt of each retrying stage type can have. */
-const ENDINGS: Record<"agent" | "action", readonly RetryEnding[]> = {
-  agent: ["no_result", "lost", "timeout", "turn_error"],
-  action: ["turn_error", "timeout"],
-};
 
 /**
  * A stage that can fail needs somewhere to go: its `onExhausted`, or a
@@ -56,13 +50,13 @@ export function failureFindings(loaded: LoadedDefinition): Finding[] {
       (stage.type === "agent" || stage.type === "action") &&
       stage.retry.max > 0 &&
       stage.retry.on.length > 0 &&
-      !stage.retry.on.some((e) => ENDINGS[stage.type].includes(e))
+      !stage.retry.on.some((e) => STAGE_ENDINGS[stage.type].includes(e))
     ) {
       out.push({
         check: "failure",
         severity: "warning",
         stage: id,
-        message: `stage ${id}: retry.on lists only ${stage.retry.on.join(", ")}, which an ${stage.type} stage never ends with; an ${stage.type} ends ${ENDINGS[stage.type].join(" or ")}`,
+        message: `stage ${id}: retry.on lists only ${stage.retry.on.join(", ")}, which an ${stage.type} stage never ends with; an ${stage.type} ends ${STAGE_ENDINGS[stage.type].join(" or ")}`,
       });
     }
     const target =

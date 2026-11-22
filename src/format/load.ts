@@ -9,6 +9,7 @@ import {
   type JsonSchema,
   validateJson,
 } from "./jsonschema.js";
+import { DEFAULT_RETRY_ON } from "./rules.js";
 import {
   type ActionStage,
   type AgentStage,
@@ -41,15 +42,6 @@ type Raw = Record<string, unknown>;
 /** Applied to agent stages when neither the stage nor the defaults give a retry. */
 const agentRetry = (): RetryPolicy => ({ max: 1, on: ["lost"] });
 const otherRetry = (): RetryPolicy => ({ max: 0, on: [] });
-
-/**
- * What a `retry` given without `on` retries: for an agent, a turn lost to a
- * restart; for an action, a call that threw or ran past the call timeout.
- */
-const DEFAULT_RETRY_ON: Record<"agent" | "action", RetryEnding[]> = {
-  agent: ["lost"],
-  action: ["turn_error", "timeout"],
-};
 
 /** A retry as written: `on` may be left out. */
 type RawRetry = { max: number; on?: RetryEnding[] };
