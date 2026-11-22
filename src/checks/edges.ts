@@ -5,6 +5,8 @@ export interface Edge {
   from: string;
   /** The outcome name, or `on_timeout`, `on_exhausted`, `next`, `on_cancel`. */
   outcome: string;
+  /** True for a label the format itself adds (timeouts, exhaustion, cancel, a plain next), not a declared outcome. */
+  synthetic: boolean;
   /** Position within a branch list; absent for a plain target. */
   branch?: number;
   to: string;
@@ -19,10 +21,10 @@ export function edgeId(e: Edge): string {
 
 function nextEdges(from: string, outcome: string, next: Next): Edge[] {
   if (typeof next === "string") {
-    return next === "" ? [] : [{ from, outcome, to: next }];
+    return next === "" ? [] : [{ from, outcome, synthetic: false, to: next }];
   }
   return next.map((b, branch) => {
-    const e: Edge = { from, outcome, branch, to: b.to };
+    const e: Edge = { from, outcome, synthetic: false, branch, to: b.to };
     if (b.if !== undefined) e.guard = b.if;
     return e;
   });
@@ -35,8 +37,13 @@ function nextEdges(from: string, outcome: string, next: Next): Edge[] {
  */
 export function edgesOf(def: Definition): Edge[] {
   const edges: Edge[] = [];
-  const target = (from: string, outcome: string, to: string | undefined) => {
-    if (to) edges.push({ from, outcome, to });
+  const target = (
+    from: string,
+    outcome: string,
+    to: string | undefined,
+    synthetic = true,
+  ) => {
+    if (to) edges.push({ from, outcome, synthetic, to });
   };
   for (const [id, stage] of Object.entries(def.stages)) {
     switch (stage.type) {
@@ -56,7 +63,7 @@ export function edgesOf(def: Definition): Edge[] {
         break;
       case "check":
         for (const [name, to] of Object.entries(stage.outcomes)) {
-          target(id, name, to);
+          target(id, name, to, false);
         }
         break;
       case "action":

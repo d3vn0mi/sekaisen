@@ -22,7 +22,8 @@ function answered(def: Definition, e: Edge): boolean {
     s?.type === "gate" &&
     s.who === "operator" &&
     s.poll === undefined &&
-    e.outcome in s.outcomes
+    !e.synthetic &&
+    Object.hasOwn(s.outcomes, e.outcome)
   );
 }
 
@@ -31,7 +32,7 @@ function declared(def: Definition, stage: string, outcome: string): boolean {
   const s = def.stages[stage];
   return (
     (s?.type === "agent" || s?.type === "gate" || s?.type === "check") &&
-    outcome in s.outcomes
+    Object.hasOwn(s.outcomes, outcome)
   );
 }
 
@@ -53,7 +54,10 @@ function breaks(def: Definition, e: Edge, edges: Edge[]): boolean {
       return false;
     }
     const onB = (x: Edge): boolean =>
-      b.outcome !== undefined && x.from === b.stage && x.outcome === b.outcome;
+      b.outcome !== undefined &&
+      !x.synthetic &&
+      x.from === b.stage &&
+      x.outcome === b.outcome;
     if (onB(e)) return true;
     // Is there a way back from e.to to e.from that misses what the bound names?
     const hidden = (n: string): boolean =>

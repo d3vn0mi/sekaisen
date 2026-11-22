@@ -121,7 +121,7 @@ export function referenceFindings(
               st.type === "agent" || st.type === "gate" || st.type === "check"
                 ? st.outcomes
                 : {};
-            if (!(t.outcome in outs)) {
+            if (!Object.hasOwn(outs, t.outcome)) {
               err(
                 `${where}: guard counts undeclared outcome ${t.stage}.${t.outcome}`,
                 e.from,

@@ -266,6 +266,32 @@ const STAGE_DEFS: Record<string, string> = {
   end: "endStage",
 };
 
+const RESERVED_OUTCOMES = ["on_timeout", "on_exhausted", "on_cancel", "next"];
+
+/** Rules the schema cannot say: reserved outcome names and gate kinds. */
+function stageRules(id: string, stage: Raw): string[] {
+  const out: string[] = [];
+  if (isObject(stage.outcomes)) {
+    for (const name of Object.keys(stage.outcomes)) {
+      if (RESERVED_OUTCOMES.includes(name)) {
+        out.push(`stage ${id}: outcome name ${name} is reserved`);
+      }
+    }
+  }
+  if (stage.type === "gate") {
+    const who = stage.who !== undefined;
+    const poll = stage.poll !== undefined;
+    if (who && poll) {
+      out.push(
+        `stage ${id}: a gate has either who: operator or poll, not both`,
+      );
+    } else if (!who && !poll) {
+      out.push(`stage ${id}: a gate needs who: operator or poll`);
+    }
+  }
+  return out;
+}
+
 /** Schema errors for the file, one per problem, with stage-level precision. */
 function schemaProblems(doc: Raw): string[] {
   const schema = definitionSchema();
@@ -294,6 +320,7 @@ function schemaProblems(doc: Raw): string[] {
     }
     problems.push(
       ...validateJson({ $ref: `#/$defs/${def}`, $defs: defs }, stage, where),
+      ...stageRules(id, stage),
     );
   }
   return problems;

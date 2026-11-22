@@ -173,4 +173,31 @@ describe("termination", () => {
     const l = loaded({ a: agent({ ok: { next: "g" } }), g, z: end() });
     expect(term(await run(l))).toHaveLength(1);
   });
+
+  test("a declared outcome named on_timeout does not turn the timeout edge into an answer", async () => {
+    const g: Stage = {
+      type: "gate",
+      who: "operator",
+      timeout: 1000,
+      onTimeout: { next: "a" },
+      outcomes: { on_timeout: { next: "z" } },
+    } as Stage;
+    const l = loaded({ a: agent({ ok: { next: "g" } }), g, z: end() });
+    expect(term(await run(l))).toHaveLength(1);
+  });
+
+  test("a declared outcome named on_exhausted is not what a bound on the label counts", async () => {
+    const a = agent({ on_exhausted: { next: "z" } }) as AgentStage;
+    a.onExhausted = "b";
+    const l = loaded({
+      a,
+      b: agent({
+        ok: {
+          next: [{ if: "count(a.on_exhausted) < 3", to: "a" }, { to: "z" }],
+        },
+      }),
+      z: end(),
+    });
+    expect(term(await run(l))).toHaveLength(1);
+  });
 });

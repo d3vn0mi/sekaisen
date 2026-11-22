@@ -123,6 +123,37 @@ describe("loadDefinition", () => {
     );
   });
 
+  test("reserved outcome names are rejected", async () => {
+    const file = await rewrite((y) =>
+      y.replace(
+        "      drafted:\n",
+        "      on_exhausted: { next: failed }\n      drafted:\n",
+      ),
+    );
+    expect((await loadDefinition(file)).problems).toContain(
+      "stage draft: outcome name on_exhausted is reserved",
+    );
+  });
+
+  test("a gate cannot have both who and poll", async () => {
+    const file = await rewrite((y) =>
+      y.replace(
+        "    who: operator\n",
+        "    who: operator\n    poll: { fact: demo.ready, every: 5m }\n",
+      ),
+    );
+    expect((await loadDefinition(file)).problems).toContain(
+      "stage publish: a gate has either who: operator or poll, not both",
+    );
+  });
+
+  test("a gate needs who or poll", async () => {
+    const file = await rewrite((y) => y.replace("    who: operator\n", ""));
+    expect((await loadDefinition(file)).problems).toContain(
+      "stage publish: a gate needs who: operator or poll",
+    );
+  });
+
   test("a missing brief is a problem", async () => {
     await rm(path.join(work, "briefs/check.md"));
     const loaded = await loadDefinition(path.join(work, "pipeline.yaml"));
