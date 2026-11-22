@@ -20,12 +20,14 @@ optional.
 | `openSession(agent, key)` | yes | Prepares a session for an agent under an engine-chosen key. May do nothing |
 | `startTurn(p)` | yes | Starts one turn and returns its run id at once |
 | `readRunOutcome(runId)` | yes | Says whether a turn is running, ended (and how), or unknown |
-| `deliver(sessionKey, message)` | yes | Tells a session something without starting a stage, such as a gate reminder |
+| `deliver(sessionKey, message)` | yes | Tells a session something without starting a stage. The engine does not call it yet; see below |
 | `abortTurn(runId)` | no | Stops a turn that is still running; returns whether it did |
 | `schedule(spec, fn)` | no | Lets the host's own loop drive the engine's tick; returns `{ dispose() }` |
 | `guardToolCall(fn)` | no | Hardening: receives a function that decides each tool call, `allow` or `{ deny }` |
 
-An adapter that omits an optional call loses only that feature. Without `abortTurn` it reports
+The engine calls `capabilities`, `openSession`, `startTurn`, `readRunOutcome` and `abortTurn`. It does
+not yet call `deliver`, `schedule` or `guardToolCall`, nor `capabilities().agentTools`; these are for
+the host's own wiring (see below). An adapter that omits `abortTurn` loses only that feature. Without `abortTurn` it reports
 `canAbort: false`, and a timed-out turn is retired by its token instead of being stopped.
 
 ### `capabilities()`
@@ -40,7 +42,8 @@ interface Capabilities {
 }
 ```
 
-The engine reads these at start-up. `maxConcurrent` is the default lane cap, and the timing check
+The engine reads these lazily, once per engine instance, the first time it needs them. A failed read
+is retried; a change after a successful read is not picked up. `maxConcurrent` is the default lane cap, and the timing check
 compares each stage's deadline against `turnCapMs`. `subscriptionProvider` is the provider name the
 `providers: subscription` policy compares against each turn's reported `runtime.provider`; leave it
 out when the harness has no such notion. `agentTools`, when present, lets the host verify that an agent holds the
@@ -51,9 +54,10 @@ completion tools; the engine does not call it itself.
 The engine, not the adapter, chooses session keys, and a key is stable for a stage's session policy:
 
 - `run:<runId>:<agent>` for `session: run`, one session per run and agent;
-- `project:<project>:<agent>` for `session: project`, shared across runs of a project.
+- `project:<project>:<agent>` for `session: project`, shared across runs of a project. The project
+  is the run's `project` input, and falls back to the run id when there is none.
 
-The adapter maps a key to a session of its own. **The same key must reach the same session**, so a
+Treat a key as opaque. The adapter maps a key to a session of its own. **The same key must reach the same session**, so a
 continuation turn and a later stage of the same run see what the agent already did.
 
 ### `startTurn(p)`
@@ -100,38 +104,66 @@ type RunOutcome =
 - `unknown`: the harness no longer knows this run id. After a restart the engine ends such an attempt
   as `lost` and applies the stage's retry policy.
 
-**Usage limits.** When a provider refuses a turn because a usage limit was hit, put the refusal text
-in `error`. The engine recognises a line of the form
+**Usage limits.** When a provider refuses a turn because a usage limit was hit, report
+`ending: "error"` (or `"timeout"` or `"killed"`) with the refusal text in `error`. A refusal on an
+`ok` ending is never recognised. The engine looks for a line of the form
 
 ```text
 You've hit your (session |usage |weekly )?limit …
 ```
 
-and, when the text carries a `resets <time>` phrase, reads the reset time from it (an ISO instant
-with a zone, or a clock time). The affected provider is paused until then; a reset it cannot parse
-pauses it for one hour. A refused turn is not a failure: the stage run returns to `submitted`, no
-retry is spent, and it is dispatched again once the pause lifts.
+and, **on the same line**, a `resets <time>` phrase. The accepted forms of `<time>`:
+
+- an ISO instant with a zone: `2026-11-22T18:00:00Z`, `2026-11-22T19:00:00+01:00`;
+- a time of day: `7pm`, `7:30pm` (its next occurrence);
+- a date and time: `Nov 1, 7pm` (the nearest such date).
+
+A clock time without a zone is read as UTC. Append the IANA zone in parentheses, as in
+`7pm (Europe/Berlin)`, or emit an ISO instant. A reset that passed within the last hour is about to
+take effect and pauses for five minutes; one the engine cannot read, or that lies further in the
+past, pauses for one hour.
+
+The paused provider is `runtime.provider`, else the capabilities' `subscriptionProvider`, else
+`"default"`. A refused turn is not a failure: the stage run returns to `submitted`, no retry is
+spent, and it is dispatched again once the pause lifts.
+
+- **Under `providers: fleet` (the default)**, any live refusal holds every fleet run. Report a
+  refusal only when the harness's whole fallback chain failed, and always set `runtime` on it.
+- **Under `providers: subscription` or `{ allow: [...] }`**, `runtime.provider` on every ended turn
+  must be accurate. A turn that ended `ok` on a provider outside the allowed set, without
+  `stage_complete`, pauses later dispatches through a policy limit and is not retried; one that did
+  call `stage_complete` is accepted.
 
 ### `abortTurn(runId)` (optional)
 
-Stops a turn that is still running and returns whether it did. The engine calls it after retiring the
+Stops a turn that is still running and returns whether it did. Without it, set
+`canAbort: false`. The engine calls it after retiring the
 turn's token (on a deadline, a retry or a cancel), so a late turn cannot complete the stage even when
 the abort fails. It retries a failed abort with backoff.
 
 ### `deliver(sessionKey, message)`
 
-Sends a message into a session without starting a stage run, for example a reminder that a gate is
-still waiting. It must not start a stage.
+Sends a message into a session without starting a stage run. The engine does not call it yet: a gate
+reminder is a transition in the log and a `gate` event the host can show however it likes. A host may
+use `deliver` for its own notifications, such as relaying that event into a session.
 
 ### `schedule(spec, fn)` and `guardToolCall(fn)` (optional)
 
-The engine calls neither of these itself; they are hooks for the host's wiring code.
+The engine calls neither of these itself, and it does not call `capabilities().agentTools` either.
+They are hooks for the host's wiring code.
 
 `schedule` lets a host whose harness already has a scheduler drive the engine's tick (`engine.tick()`
 is safe to call at any time): the host calls `schedule(spec, () => engine.tick())` and keeps the
 returned handle, whose `dispose()` stops it. `guardToolCall` receives a function that answers
 `"allow"` or `{ deny: reason }` for a pending `{ agent, tool }`, so a harness with tool hooks can
 refuse a call a stage does not allow.
+
+### Call timeouts
+
+Every adapter call is cut off after `adapterCallTimeoutMs` (30 seconds by default). The call is not
+cancelled: the engine stops waiting and drops its late result. A `startTurn` that timed out is
+retried under the same idempotency key, because the turn may already be running. So the idempotency
+dedupe above is load-bearing, and `startTurn` must return at once and never wait for the turn.
 
 ## The completion contract
 
@@ -166,8 +198,9 @@ silent wrong turn.
 
 `stage_progress` saves a checkpoint (what is done, what is next, where the work lives, up to 64 KiB)
 when the agent cannot finish in this turn. If the turn then ends normally and the stage has turns
-left (`turns: { max: N }`), the engine dispatches a continuation turn into the same session with the
-same token and the last note.
+left (`turns: { max: N }`), the engine dispatches a continuation turn into the same session with
+the same token and the last note. Only a note written during the turn that just ended earns a
+continuation; an older note does not.
 
 ### The token secret
 
@@ -193,6 +226,8 @@ The secret file must hold at least 32 raw bytes and be the same secret the dispa
 `--agent` names the agent the connection belongs to, so the engine refuses a completion for another
 agent's stage. A harness that speaks MCP but has no plugin system needs nothing else for completion;
 it still needs an adapter for the required calls.
+
+The engine itself (`Engine`) is not yet exported from the package root; that arrives with the release.
 
 ## A minimal adapter
 

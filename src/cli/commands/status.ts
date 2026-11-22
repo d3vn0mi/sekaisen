@@ -144,7 +144,7 @@ function textView(s: Snapshot, shown: Snapshot["rows"]): string {
     );
   }
   if (s.turns.length > 0) {
-    out.push("", "providers:");
+    out.push("", "providers (per stage run):");
     for (const u of s.turns) {
       const r = u.runtime;
       out.push(

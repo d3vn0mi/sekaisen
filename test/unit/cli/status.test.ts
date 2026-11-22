@@ -42,7 +42,7 @@ describe("sekaisen status", () => {
   test("providers used per turn come from the stage runs", async () => {
     const r = await cli("status", fx.done, "--store", fx.file);
     expect(r.out).toContain(
-      "providers:\n  draft attempt 1: demo-provider demo-model\n",
+      "providers (per stage run):\n  draft attempt 1: demo-provider demo-model\n",
     );
     const j = JSON.parse(
       (await cli("status", fx.done, "--store", fx.file, "--json")).out,
