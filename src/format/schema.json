@@ -1,0 +1,212 @@
+{
+  "title": "sekaisen pipeline definition, format 1",
+  "type": "object",
+  "properties": {
+    "format": { "const": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "title": { "type": "string" },
+    "version": { "type": "integer", "minimum": 0 },
+    "inputs": { "type": "object" },
+    "defaults": {
+      "type": "object",
+      "properties": {
+        "deadline": { "$ref": "#/$defs/duration" },
+        "retry": { "$ref": "#/$defs/retry" },
+        "priority": { "type": "integer" }
+      },
+      "additionalProperties": false
+    },
+    "providers": {
+      "oneOf": [
+        { "enum": ["fleet", "subscription"] },
+        {
+          "type": "object",
+          "properties": {
+            "allow": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["allow"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "start": { "type": "string", "minLength": 1 },
+    "stages": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/stage" }
+    },
+    "on_cancel": { "type": "string" }
+  },
+  "required": ["format", "id", "version", "start", "stages"],
+  "additionalProperties": false,
+  "$defs": {
+    "duration": { "type": "string", "pattern": "^[0-9]+[smhd]$" },
+    "retry": {
+      "type": "object",
+      "properties": {
+        "max": { "type": "integer", "minimum": 0 },
+        "on": {
+          "type": "array",
+          "items": {
+            "enum": ["no_result", "lost", "timeout", "turn_error"]
+          }
+        }
+      },
+      "required": ["max"],
+      "additionalProperties": false
+    },
+    "next": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "if": { "type": "string" },
+              "to": { "type": "string", "minLength": 1 }
+            },
+            "required": ["to"],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    "outcome": {
+      "type": "object",
+      "properties": {
+        "fields": { "type": "object" },
+        "next": { "$ref": "#/$defs/next" }
+      },
+      "required": ["next"],
+      "additionalProperties": false
+    },
+    "outcomes": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/outcome" }
+    },
+    "stage": {
+      "oneOf": [
+        { "$ref": "#/$defs/agentStage" },
+        { "$ref": "#/$defs/gateStage" },
+        { "$ref": "#/$defs/checkStage" },
+        { "$ref": "#/$defs/actionStage" },
+        { "$ref": "#/$defs/waitStage" },
+        { "$ref": "#/$defs/endStage" }
+      ]
+    },
+    "agentStage": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "agent" },
+        "agent": { "type": "string", "minLength": 1 },
+        "session": { "enum": ["run", "project"] },
+        "brief": { "type": "string", "minLength": 1 },
+        "deadline": { "$ref": "#/$defs/duration" },
+        "turns": {
+          "type": "object",
+          "properties": {
+            "max": { "type": "integer", "minimum": 1 },
+            "cap": { "$ref": "#/$defs/duration" }
+          },
+          "additionalProperties": false
+        },
+        "retry": { "$ref": "#/$defs/retry" },
+        "requires": {
+          "type": "object",
+          "properties": {
+            "tools": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["tools"],
+          "additionalProperties": false
+        },
+        "deploys": { "type": "boolean" },
+        "on_exhausted": { "type": "string" },
+        "outcomes": { "$ref": "#/$defs/outcomes" }
+      },
+      "required": ["type", "agent", "brief", "outcomes"],
+      "additionalProperties": false
+    },
+    "gateStage": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "gate" },
+        "who": { "const": "operator" },
+        "poll": {
+          "type": "object",
+          "properties": {
+            "fact": { "type": "string", "minLength": 1 },
+            "every": { "$ref": "#/$defs/duration" }
+          },
+          "required": ["fact", "every"],
+          "additionalProperties": false
+        },
+        "prompt": { "type": "string" },
+        "timeout": { "$ref": "#/$defs/duration" },
+        "on_timeout": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": { "remind": { "$ref": "#/$defs/duration" } },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": { "next": { "type": "string", "minLength": 1 } },
+              "required": ["next"],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "outcomes": { "$ref": "#/$defs/outcomes" }
+      },
+      "required": ["type", "timeout", "outcomes"],
+      "additionalProperties": false
+    },
+    "checkStage": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "check" },
+        "check": { "type": "string", "minLength": 1 },
+        "outcomes": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        }
+      },
+      "required": ["type", "check", "outcomes"],
+      "additionalProperties": false
+    },
+    "actionStage": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "action" },
+        "action": { "type": "string", "minLength": 1 },
+        "next": { "type": "string", "minLength": 1 },
+        "retry": { "$ref": "#/$defs/retry" },
+        "on_exhausted": { "type": "string" }
+      },
+      "required": ["type", "action", "next"],
+      "additionalProperties": false
+    },
+    "waitStage": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "wait" },
+        "for": { "$ref": "#/$defs/duration" },
+        "until": { "type": "string", "minLength": 1 },
+        "next": { "type": "string", "minLength": 1 }
+      },
+      "required": ["type", "next"],
+      "additionalProperties": false
+    },
+    "endStage": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "end" },
+        "status": { "enum": ["completed", "failed", "canceled"] }
+      },
+      "required": ["type", "status"],
+      "additionalProperties": false
+    }
+  }
+}
