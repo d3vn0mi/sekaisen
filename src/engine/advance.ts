@@ -63,7 +63,9 @@ export function nextOf(stage: Stage, outcome: string): Next | undefined {
 
 /**
  * Records `done` (the transition that ended `from`) with the stage chosen
- * by `outcome`, then enters that stage or ends the run. Returns the stage
+ * by `outcome` (and, for a branch list, the index of the branch taken, so
+ * the edge followed can be read back from the log), then enters that stage
+ * or ends the run. Returns the stage
  * entered, or null when the run failed without reaching one. Never throws
  * for a guard; a guard that cannot be evaluated fails the run.
  */
@@ -84,7 +86,13 @@ export function advance(
     ...done,
     runId: ctx.run.runId,
     at: ctx.now,
-    detail: { ...(done.detail as object), next: target },
+    detail: {
+      ...(done.detail as object),
+      next: target,
+      ...("to" in chosen && chosen.branch !== undefined
+        ? { branch: chosen.branch }
+        : {}),
+    },
   });
   if ("error" in chosen) {
     failRun(ctx, "guard_error", ENGINE_ACTOR, {
@@ -97,20 +105,21 @@ export function advance(
   return chosen.to;
 }
 
-/** The first branch whose guard holds. */
+/** The first branch whose guard holds, with its index in the list. */
 export function choose(
   ctx: RunCtx,
   stage: string,
   outcome: string,
   next: Next,
-): { to: string } | { error: string; branch?: string } {
+): { to: string; branch?: number } | { error: string; branch?: string } {
   if (typeof next === "string") return { to: next };
   const gc = guardContext(ctx.t, ctx.run);
   for (const [i, b] of next.entries()) {
-    if (b.if === undefined) return { to: b.to };
+    if (b.if === undefined) return { to: b.to, branch: i };
     const branch = `${stage}.${outcome}[${i}]`;
     try {
-      if (evalGuard(guard(ctx.pinned, b.if), gc)) return { to: b.to };
+      if (evalGuard(guard(ctx.pinned, b.if), gc))
+        return { to: b.to, branch: i };
     } catch (err) {
       return { error: errorMessage(err), branch };
     }

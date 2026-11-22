@@ -1,0 +1,51 @@
+format: 1
+id: fix-loop
+title: Draft and check, with an operator review when checks keep failing
+version: 1
+inputs:
+  type: object
+  properties:
+    topic: { type: string }
+  required: [topic]
+defaults:
+  deadline: 30m
+start: draft
+stages:
+  draft:
+    type: agent
+    agent: drafter
+    session: run
+    brief: briefs/draft.md
+    retry: { max: 1, on: [lost, no_result] }
+    outcomes:
+      drafted:
+        fields: { summary: "string?" }
+        next: check
+      blocked: { next: failed }
+  check:
+    type: agent
+    agent: checker
+    session: run
+    brief: briefs/check.md
+    outcomes:
+      pass: { next: publish }
+      fail:
+        next:
+          - { if: "count(check.fail) < 3", to: draft }
+          - { to: review }
+  review:
+    type: gate
+    who: operator
+    prompt: "Checks keep failing for {{inputs.topic}}. Publish anyway?"
+    timeout: 24h
+    on_timeout: { next: failed }
+    outcomes:
+      approve: { next: publish }
+      reject: { next: failed }
+  publish:
+    type: action
+    action: demo.publish
+    retry: { max: 1, on: [turn_error] }
+    next: done
+  done: { type: end, status: completed }
+  failed: { type: end, status: failed }

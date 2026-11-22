@@ -1,0 +1,8 @@
+inputs: { topic: rust }
+stages:
+  check:
+    - { outcome: fail }
+    - { outcome: fail }
+    - { outcome: fail }
+  review:
+    - { ending: timeout }

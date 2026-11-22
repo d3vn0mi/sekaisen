@@ -3,6 +3,7 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { checkCommand } from "./commands/check.js";
 import { renderCommand } from "./commands/render.js";
+import { simulateCommand } from "./commands/simulate.js";
 
 export interface Io {
   out(text: string): void;
@@ -14,6 +15,7 @@ const USAGE = `usage: sekaisen <command> [options]
 commands:
   check <file...> [--json]   verify pipeline definitions
   render <file> [--current <stage>]   print a Mermaid diagram
+  simulate <file> --script <yaml> [--json]   run a scripted simulation
 
   --help                     show this text
 `;
@@ -21,6 +23,7 @@ commands:
 const COMMANDS: Record<string, (args: string[], io: Io) => Promise<number>> = {
   check: checkCommand,
   render: renderCommand,
+  simulate: simulateCommand,
 };
 
 /** Dispatches a subcommand and returns the process exit code. */

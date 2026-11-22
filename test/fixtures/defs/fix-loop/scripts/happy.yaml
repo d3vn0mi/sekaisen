@@ -1,0 +1,6 @@
+inputs: { topic: rust }
+stages:
+  draft:
+    - { outcome: drafted, fields: { summary: a first draft } }
+  check:
+    - { outcome: pass }
