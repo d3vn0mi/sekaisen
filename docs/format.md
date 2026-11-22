@@ -655,7 +655,7 @@ finding is an error, a warning or information.
 | Termination | Every cycle in the graph is broken by an answered operator gate (one of its declared outcomes; a timeout edge does not count), or by an edge whose guard bounds a `count` or `attempts` term against an integer literal, where every way round the cycle passes what the term counts. Only bounds in the guard's top-level `and` count; under `or` or `not` a term bounds nothing |
 | Policy | Reports the provider policy. A stage with `deploys: true` cannot be reached from `start` or `on_cancel` without passing an operator gate's answered outcome |
 | Timing | An agent stage's `turns.cap` is at most the harness's turn cap (when the harness's capabilities are known); its deadline is at least `turns.max` × 60 seconds; a gate's `remind` is at least 60 seconds and at most its `timeout` |
-| Failure | A stage that can fail has somewhere to go when it is exhausted: its `on_exhausted` (agent and action stages only) or the pipeline's `failed` end (an error otherwise); a `retry` with `max` above 0 and an empty `on` (a warning) |
+| Failure | A stage that can fail has somewhere to go when it is exhausted: its `on_exhausted` (agent and action stages only) or the pipeline's `failed` end (an error otherwise); a `retry` with `max` above 0 whose `on` is empty, or lists only endings the stage type never has, such as an action stage retrying `no_result` (a warning) |
 
 ## The transition log
 

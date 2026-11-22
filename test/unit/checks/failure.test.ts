@@ -90,4 +90,31 @@ describe("failure", () => {
       },
     ]);
   });
+
+  test("an action retrying only endings an action never has is a warning", async () => {
+    const action = (on: string[], max = 1): Stage =>
+      ({
+        type: "action",
+        action: "demo.notify",
+        next: "z",
+        retry: { max, on },
+      }) as unknown as Stage;
+    const l = loaded({
+      a: agent({ ok: { next: "n" } }),
+      n: action(["no_result", "lost"]),
+      m: action(["no_result", "timeout"]),
+      o: action(["lost"], 0),
+      z: end(),
+      failed: end("failed"),
+    });
+    expect(failure(await run(l, registry()))).toEqual([
+      {
+        check: "failure",
+        severity: "warning",
+        stage: "n",
+        message:
+          "stage n: retry.on lists only no_result, lost, which an action stage never ends with; an action ends turn_error or timeout",
+      },
+    ]);
+  });
 });

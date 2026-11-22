@@ -102,6 +102,7 @@ stages:
   notify:
     type: action
     action: demo.notify
+    retry: { max: 2 }
     next: done
   done: { type: end, status: completed }
   failed: { type: end, status: failed }
@@ -128,7 +129,9 @@ stateDiagram-v2
 Before anything runs, `sekaisen check` proves what it can from the file alone. Every stage is
 reachable, and every outcome leads somewhere. The draft and check loop is bounded by its
 `count()` guard. The `publish` stage, marked `deploys: true`, can only be reached through a gate
-that a person resolves. `demo.notify` is an action the host has registered by name.
+that a person resolves. `demo.notify` is an action the host has registered by name; its own
+`retry` tries a failed call twice more, since the agents' default retry names endings an action
+never has.
 
 At run time the engine:
 
