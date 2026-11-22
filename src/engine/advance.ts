@@ -18,6 +18,9 @@ import { descend, errorMessage } from "./values.js";
 /** The actor of transitions the engine makes on its own. */
 export const ENGINE_ACTOR = "engine";
 
+/** The actor of transitions restart reconciliation makes. */
+export const RECONCILE_ACTOR = "engine:reconcile";
+
 /** Everything advancing a run needs, inside one transaction. */
 export interface RunCtx {
   t: StoreTx;
@@ -26,6 +29,13 @@ export interface RunCtx {
   run: RunRow;
   now: number;
   emit: EmitFn;
+  /** Who the engine's own transitions name; `ENGINE_ACTOR` when unset. */
+  actor?: string;
+}
+
+/** The actor of the transitions the engine writes in `ctx`. */
+export function actorOf(ctx: { actor?: string }): string {
+  return ctx.actor ?? ENGINE_ACTOR;
 }
 
 /** A transition the caller describes; advancing adds the run, time and next stage. */
@@ -188,6 +198,7 @@ export function newAttempt(
     waitReason: null,
     // The tick runs every other stage type itself, starting now.
     wakeAt: type === "agent" ? null : now,
+    abortRunId: null,
   };
 }
 

@@ -6,6 +6,7 @@ import type {
 } from "../format/types.js";
 import type { StageRunPatch, StageRunRow } from "../store/types.js";
 import {
+  actorOf,
   ENGINE_ACTOR,
   enter,
   failRun,
@@ -90,19 +91,20 @@ export function endAttempt(
     waitReason: null,
     wakeAt: null,
   });
-  const draft = transition(row, "failed", event);
+  const actor = actorOf(ctx);
+  const draft = transition(row, "failed", event, actor);
   if (canRetry(stage, row, ending)) {
     const attempt = t.maxAttempt(row.runId, row.stage) + 1;
     append(ctx, draft, { ...detail, retry: { attempt } });
-    submit(ctx, row.stage, row.visit, row.retryIndex + 1, ENGINE_ACTOR);
+    submit(ctx, row.stage, row.visit, row.retryIndex + 1, actor);
     return;
   }
   const target = exhaustedTarget(ctx.pinned.def, stage);
   append(ctx, draft, { ...detail, exhausted: true, next: target ?? null });
   if (target === undefined) {
-    failRun(ctx, "exhausted_no_failed_end", ENGINE_ACTOR, { stage: row.stage });
+    failRun(ctx, "exhausted_no_failed_end", actor, { stage: row.stage });
   } else {
-    enter(ctx, target, ENGINE_ACTOR);
+    enter(ctx, target, actor);
   }
 }
 
@@ -118,7 +120,7 @@ export function continueAttempt(
     state: "submitted",
     dispatchedAt: null,
   });
-  append(ctx, transition(row, "submitted", "continue"), detail);
+  append(ctx, transition(row, "submitted", "continue", actorOf(ctx)), detail);
 }
 
 /** A pause to write, and to hold the attempt on. */
@@ -162,7 +164,7 @@ export function pauseAttempt(
       ? {}
       : { turnsUsed: Math.max(0, row.turnsUsed - 1), deadlineAt: null }),
   });
-  append(ctx, transition(row, "submitted", "usage_limited"), {
+  append(ctx, transition(row, "submitted", "usage_limited", actorOf(ctx)), {
     ...detail,
     [pause.scope]: pause.key,
     until: pause.until,
@@ -198,6 +200,7 @@ export function transition(
   row: StageRunRow,
   to: StageRunRow["state"],
   event: string,
+  actor: string = ENGINE_ACTOR,
 ): TransitionDraft {
   return {
     stageRunId: row.stageRunId,
@@ -205,7 +208,7 @@ export function transition(
     toState: to,
     event,
     outcome: null,
-    actor: ENGINE_ACTOR,
+    actor,
     detail: null,
   };
 }

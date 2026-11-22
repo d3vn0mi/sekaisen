@@ -34,6 +34,17 @@ export class FakeAdapter implements HarnessAdapter {
     this.outcomes.set(runId, outcome);
   }
 
+  /**
+   * Takes over a turn a harness accepted before this fake existed (one that
+   * outlived a crashed engine): a resend under its key gets `runId` back,
+   * and the run ids handed out next continue after it.
+   */
+  adopt(idempotencyKey: string, runId: string): void {
+    this.byKey.set(idempotencyKey, runId);
+    this.runIds.add(runId);
+    this.started++;
+  }
+
   async capabilities(): Promise<Capabilities> {
     return this.caps;
   }

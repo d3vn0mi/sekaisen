@@ -63,7 +63,8 @@ export const MIGRATIONS: readonly string[] = [
     held_since      INTEGER,
     runtime_json    TEXT,
     wait_reason     TEXT,
-    wake_at         INTEGER
+    wake_at         INTEGER,
+    abort_run_id    TEXT
   );
   CREATE INDEX stage_runs_state ON stage_runs (state);
   CREATE INDEX stage_runs_token_hash ON stage_runs (token_hash);
@@ -72,6 +73,8 @@ export const MIGRATIONS: readonly string[] = [
     WHERE dispatched_at IS NOT NULL;
   CREATE INDEX stage_runs_wake ON stage_runs (wake_at)
     WHERE wake_at IS NOT NULL;
+  CREATE INDEX stage_runs_abort ON stage_runs (abort_run_id)
+    WHERE abort_run_id IS NOT NULL;
 
   CREATE TABLE transitions (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,

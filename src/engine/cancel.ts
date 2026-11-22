@@ -1,14 +1,14 @@
 import { endRun, newAttempt, type RunCtx } from "./advance.js";
 import { append, move, transition } from "./endings.js";
-import type { TxCtx } from "./turns.js";
+import type { AbortRequest, TxCtx } from "./turns.js";
 
 /**
  * Cancels a run, as one transaction: the live stage run and the run move to
  * `canceled`, an open gate is resolved by `canceled:<actor>`, and the
  * definition's `onCancel` action, when it names one, is submitted to run
  * once. The live stage run keeps its token hash, so a later completion is
- * recognised and refused (and logged). Returns the harness run to abort
- * when a turn was in flight.
+ * recognised and refused (and logged). Returns the harness turn to abort
+ * when one was in flight.
  *
  * The cancel action is a stage run of that action stage with the fixed
  * idempotency key `${runId}:cancel` instead of one derived from its
@@ -21,7 +21,7 @@ export function cancelRun(
   c: TxCtx,
   runId: string,
   actor: string,
-): string | undefined {
+): AbortRequest | undefined {
   if (typeof actor !== "string" || actor === "") {
     throw new Error("cancel needs who canceled the run");
   }
@@ -32,11 +32,15 @@ export function cancelRun(
   }
   const pinned = c.pinned.of(c.t, run);
   const ctx: RunCtx = { t: c.t, pinned, run, now: c.now, emit: c.emit };
-  let abort: string | undefined;
+  let abort: AbortRequest | undefined;
   const live = c.t.liveStageRun(runId);
   if (live) {
-    if (live.state === "working" && live.dispatchedAt !== null) {
-      abort = live.adapterRunId ?? undefined;
+    if (
+      live.state === "working" &&
+      live.dispatchedAt !== null &&
+      live.adapterRunId !== null
+    ) {
+      abort = { stageRunId: live.stageRunId, adapterRunId: live.adapterRunId };
     }
     move(ctx, live, "canceled", {
       state: "canceled",
@@ -44,11 +48,12 @@ export function cancelRun(
       dispatchedAt: null,
       waitReason: null,
       wakeAt: null,
+      ...(abort === undefined ? {} : { abortRunId: abort.adapterRunId }),
     });
     append(
       ctx,
-      { ...transition(live, "canceled", "stage_canceled"), actor },
-      abort === undefined ? {} : { adapterRunId: abort },
+      transition(live, "canceled", "stage_canceled", actor),
+      abort === undefined ? {} : { adapterRunId: abort.adapterRunId },
     );
     const gate = c.t.getGate(live.stageRunId);
     if (gate && gate.resolvedBy === null) {

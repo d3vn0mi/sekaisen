@@ -7,7 +7,7 @@ import type {
   StageRunRow,
   StoreTx,
 } from "../store/types.js";
-import { ENGINE_ACTOR, type RunCtx } from "./advance.js";
+import { actorOf, type RunCtx } from "./advance.js";
 import {
   classifyEnding,
   DEFAULT_PAUSE_MS,
@@ -39,6 +39,17 @@ export interface TxCtx {
   pinned: PinnedDefinitions;
   now: number;
   emit: EmitFn;
+  /** Who the engine's own transitions name; `ENGINE_ACTOR` when unset. */
+  actor?: string;
+}
+
+/**
+ * A harness turn to abort, recorded on its stage run (`abortRunId`) in the
+ * transaction that decided it, and cleared once the harness has answered.
+ */
+export interface AbortRequest {
+  stageRunId: string;
+  adapterRunId: string;
 }
 
 /** A tick transaction that also needs the harness's capabilities. */
@@ -134,11 +145,14 @@ export function recordTurnEnd(
 }
 
 /**
- * Ends an attempt whose deadline passed. Returns the harness run to abort
- * when a turn was in flight. The token keeps its hash, so a late completion
- * is refused as timed out.
+ * Ends an attempt whose deadline passed. Returns the harness turn to abort
+ * when one was in flight. The token keeps its hash, so a late completion is
+ * refused as timed out.
  */
-export function recordTimeout(c: TxCtx, seen: StageRunRow): string | undefined {
+export function recordTimeout(
+  c: TxCtx,
+  seen: StageRunRow,
+): AbortRequest | undefined {
   const found = current(c, seen);
   if (!found) return undefined;
   const { row, run, stage, ctx } = found;
@@ -155,13 +169,39 @@ export function recordTimeout(c: TxCtx, seen: StageRunRow): string | undefined {
     row,
     stage,
     "timeout",
-    {},
+    inFlight === undefined ? {} : { abortRunId: inFlight },
     {
       deadlineAt: row.deadlineAt,
       ...(inFlight === undefined ? {} : { adapterRunId: inFlight }),
     },
   );
-  return inFlight;
+  return inFlight === undefined
+    ? undefined
+    : { stageRunId: row.stageRunId, adapterRunId: inFlight };
+}
+
+/**
+ * Ends a working attempt whose turn the harness no longer knows, as after a
+ * restart that killed it: the attempt is `lost` and the retry policy
+ * applies. The token keeps its hash, so a late completion is refused.
+ */
+export function recordLost(c: TxCtx, seen: StageRunRow): void {
+  const found = current(c, seen);
+  if (!found) return;
+  const { row, run, stage, ctx } = found;
+  if (row.state !== "working" || run.status !== "working") return;
+  endAttempt(ctx, row, stage, "lost", {}, { adapterRunId: row.adapterRunId });
+}
+
+/** Drops an abort request once the harness has answered it. */
+export function settleAbort(c: TxCtx, req: AbortRequest): void {
+  const row = c.t.getStageRun(req.stageRunId);
+  if (row?.abortRunId !== req.adapterRunId) return;
+  c.t.updateStageRunIf(
+    row.stageRunId,
+    { state: row.state, attempt: row.attempt },
+    { abortRunId: null },
+  );
 }
 
 /** Stops watching a turn there is nothing more to learn about. */
@@ -236,7 +276,7 @@ function closeTurn(
     toState: row.state,
     event,
     outcome: null,
-    actor: ENGINE_ACTOR,
+    actor: actorOf(c),
     at: c.now,
     detail,
   });
@@ -269,6 +309,13 @@ function current(
     row,
     run,
     stage,
-    ctx: { t: c.t, pinned, run, now: c.now, emit: c.emit },
+    ctx: {
+      t: c.t,
+      pinned,
+      run,
+      now: c.now,
+      emit: c.emit,
+      ...(c.actor === undefined ? {} : { actor: c.actor }),
+    },
   };
 }

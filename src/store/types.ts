@@ -107,6 +107,12 @@ export interface StageRunRow {
    * wake time, a gate's next poll, reminder or timeout); null otherwise.
    */
   wakeAt: number | null;
+  /**
+   * A harness turn the engine decided to abort and has not yet heard back
+   * about; null when none. Kept in the store so a restart, or a harness
+   * whose capabilities cannot be read yet, does not lose the request.
+   */
+  abortRunId: string | null;
 }
 
 export interface TransitionRow {
@@ -215,13 +221,15 @@ export interface StoreTx {
    * Oldest first. `inFlight` keeps only stage runs with a turn in flight.
    * `wakes: false` keeps only stage runs without a wake time (agent stages).
    * `wakeBy` keeps only stage runs whose wake time is at or before it, and
-   * orders them by wake time, earliest first.
+   * orders them by wake time, earliest first. `abortRequested` keeps only
+   * stage runs with a harness turn still to abort.
    */
   listStageRuns(filter: {
     state?: StageRunState[];
     inFlight?: boolean;
     wakes?: false;
     wakeBy?: number;
+    abortRequested?: true;
     limit: number;
   }): StageRunRow[];
   /** False when the stage run no longer matches `expect`; the caller re-reads. */

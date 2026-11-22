@@ -19,7 +19,13 @@ import type {
   TransitionRow,
 } from "../store/types.js";
 import { turnKey } from "../store/types.js";
-import { advance, ENGINE_ACTOR, enter, type RunCtx } from "./advance.js";
+import {
+  advance,
+  ENGINE_ACTOR,
+  enter,
+  RECONCILE_ACTOR,
+  type RunCtx,
+} from "./advance.js";
 import { outcomesList, renderBrief, renderContinuation } from "./brief.js";
 import { realTimers, type Timers, withTimeout } from "./calls.js";
 import { cancelRun } from "./cancel.js";
@@ -48,10 +54,13 @@ import { type Pinned, PinnedDefinitions } from "./pinned.js";
 import { recordCallError, recordCallResult, stepStage } from "./stages.js";
 import { deriveToken, hashToken, MIN_TOKEN_SECRET_BYTES } from "./tokens.js";
 import {
+  type AbortRequest,
   admission,
   forgetTurn,
+  recordLost,
   recordTimeout,
   recordTurnEnd,
+  settleAbort,
   type TxCtx,
 } from "./turns.js";
 import { descend, errorMessage, isPlainObject } from "./values.js";
@@ -122,6 +131,11 @@ export const COMPLETION_TOOLS = ["stage_complete", "stage_progress"];
 const DEFAULT_TICK_MS = 5000;
 const DEFAULT_CALL_TIMEOUT_MS = 30_000;
 const TICK_BATCH = 100;
+/**
+ * Most turns one reconciliation reads. Turns in flight are bounded by the
+ * harness's lanes, far below this.
+ */
+const RECONCILE_BATCH = 10_000;
 
 interface Prepared {
   stageRunId: string;
@@ -146,8 +160,14 @@ export class Engine {
   private readonly callTimeoutMs: number;
   private readonly timers: Timers;
   private caps?: Promise<Capabilities>;
-  /** Turns to abort once the harness's capabilities can be read. */
-  private readonly pendingAborts: string[] = [];
+  /**
+   * Stage runs whose turn was in flight when the engine started and that
+   * reconciliation has not settled yet (the harness could not be read).
+   * The tick settles them as reconciliation would.
+   */
+  private readonly unreconciled = new Set<string>();
+  /** Harness turns an abort is being asked for right now. */
+  private readonly aborting = new Set<string>();
   private timer?: ReturnType<typeof setInterval>;
   private ticking?: Promise<void>;
 
@@ -389,7 +409,7 @@ export class Engine {
     try {
       caps = await this.capabilities();
     } catch {
-      this.pendingAborts.push(abort);
+      // The request is in the store; the tick asks once it can.
       return;
     }
     await this.abort(abort, caps);
@@ -436,10 +456,48 @@ export class Engine {
     return this.events.on(event, fn);
   }
 
-  // --- the tick -----------------------------------------------------------
+  /**
+   * Settles what the store says was in flight when the engine last stopped.
+   * Every agent stage run with a turn in flight is read from the harness: a
+   * turn that ended is classified as the tick would, one the harness no
+   * longer knows ends its attempt `lost` (its retry policy applies), and one
+   * still running is kept. A turn that cannot be read yet is kept and
+   * settled by a later tick. Aborts requested before the stop are asked
+   * again. Stage runs without a turn (waits, gates, checks, actions) resume
+   * from their stored times and are not touched. Every transition it writes
+   * names `engine:reconcile`; calling it again writes nothing new. `start()`
+   * calls it; it does nothing when the engine only takes completions.
+   */
+  async reconcile(): Promise<void> {
+    if (!this.dispatching) return;
+    let caps: Capabilities | undefined;
+    try {
+      caps = await this.capabilities();
+    } catch (err) {
+      this.report(err);
+    }
+    if (caps) await this.flushAborts(caps);
+    const turns = this.store
+      .tx((t) =>
+        t.listStageRuns({
+          state: ["working"],
+          inFlight: true,
+          wakes: false,
+          limit: RECONCILE_BATCH,
+        }),
+      )
+      .filter((row) => row.adapterRunId !== null);
+    for (const row of turns) this.unreconciled.add(row.stageRunId);
+    for (const row of turns) {
+      try {
+        await this.observe(row, caps);
+      } catch (err) {
+        this.report(err);
+      }
+    }
+  }
 
-  /** Restart reconciliation of stored work; nothing to reconcile yet. */
-  private async reconcile(): Promise<void> {}
+  // --- the tick -----------------------------------------------------------
 
   private async walk(): Promise<void> {
     if (!this.dispatching) return;
@@ -543,12 +601,20 @@ export class Engine {
   /**
    * One stage run with a turn in flight: an attempt past its deadline times
    * out; otherwise the turn's end, once the harness reports it, is recorded.
+   * A stage run reconciliation has not settled yet is settled here, as
+   * reconciliation would: a turn the harness does not know is lost, even
+   * past its deadline, since the restart killed it rather than the clock.
    */
   private async observe(
     row: StageRunRow,
     caps: Capabilities | undefined,
   ): Promise<void> {
-    if (row.state === "working" && deadlinePassed(row, this.clock.now())) {
+    const id = row.stageRunId;
+    const settling = this.unreconciled.has(id);
+    const actor = settling ? RECONCILE_ACTOR : undefined;
+    const overdue =
+      row.state === "working" && deadlinePassed(row, this.clock.now());
+    if (overdue && !settling) {
       await this.timeOut(row, caps);
       return;
     }
@@ -558,6 +624,7 @@ export class Engine {
       adapterRunId === null ||
       !["working", "completed"].includes(row.state)
     ) {
+      this.unreconciled.delete(id);
       this.commit((t, emit) => forgetTurn(this.txCtx(t, emit), row));
       return;
     }
@@ -570,45 +637,76 @@ export class Engine {
       // Read again on the next tick.
       return;
     }
-    if (outcome.state === "running") return;
+    this.unreconciled.delete(id);
     if (outcome.state === "unknown") {
-      // A working turn the harness no longer knows is for restart
-      // reconciliation; a completed one has nothing left to tell.
+      // A completed turn has nothing left to tell. A working one the harness
+      // no longer knows was lost in a restart; outside reconciliation it is
+      // left to its deadline.
       if (row.state === "completed") {
         this.commit((t, emit) => forgetTurn(this.txCtx(t, emit), row));
+      } else if (settling) {
+        this.commit((t, emit) => recordLost(this.txCtx(t, emit, actor), row));
       }
       return;
     }
+    if (overdue) {
+      await this.timeOut(row, caps, actor);
+      return;
+    }
+    if (outcome.state === "running") return;
     const ended = outcome;
     this.commit((t, emit) =>
-      recordTurnEnd({ ...this.txCtx(t, emit), caps }, row, ended),
+      recordTurnEnd({ ...this.txCtx(t, emit, actor), caps }, row, ended),
     );
   }
 
   private async timeOut(
     row: StageRunRow,
     caps: Capabilities | undefined,
+    actor?: string,
   ): Promise<void> {
     const abort = this.commit((t, emit) =>
-      recordTimeout(this.txCtx(t, emit), row),
+      recordTimeout(this.txCtx(t, emit, actor), row),
     );
-    if (abort === undefined) return;
-    if (caps) await this.abort(abort, caps);
-    else this.pendingAborts.push(abort);
+    // Without capabilities the request waits in the store for the tick.
+    if (abort !== undefined && caps) await this.abort(abort, caps);
   }
 
-  /** Aborts turns whose attempts timed out while capabilities were unknown. */
+  /** Asks again for the aborts the store holds, oldest first. */
   private async flushAborts(caps: Capabilities): Promise<void> {
-    for (const id of this.pendingAborts.splice(0)) await this.abort(id, caps);
+    const requested = this.store.tx((t) =>
+      t.listStageRuns({ abortRequested: true, limit: TICK_BATCH }),
+    );
+    for (const row of requested) {
+      if (row.abortRunId === null) continue;
+      await this.abort(
+        { stageRunId: row.stageRunId, adapterRunId: row.abortRunId },
+        caps,
+      );
+    }
   }
 
-  /** Asks the harness to stop a turn, where it can; a failure changes nothing. */
-  private async abort(adapterRunId: string, caps: Capabilities): Promise<void> {
-    const abortTurn = this.adapter.abortTurn?.bind(this.adapter);
-    if (!caps.canAbort || !abortTurn) return;
-    await this.call("abortTurn", () => abortTurn(adapterRunId)).catch(
-      () => false,
-    );
+  /**
+   * Asks the harness to stop a turn, where it can. The request is dropped
+   * once the harness answers, or when it cannot abort at all; a call that
+   * fails leaves it for the next tick.
+   */
+  private async abort(req: AbortRequest, caps: Capabilities): Promise<void> {
+    if (this.aborting.has(req.adapterRunId)) return;
+    this.aborting.add(req.adapterRunId);
+    try {
+      const abortTurn = this.adapter.abortTurn?.bind(this.adapter);
+      if (caps.canAbort && abortTurn) {
+        try {
+          await this.call("abortTurn", () => abortTurn(req.adapterRunId));
+        } catch {
+          return;
+        }
+      }
+      this.commit((t, emit) => settleAbort(this.txCtx(t, emit), req));
+    } finally {
+      this.aborting.delete(req.adapterRunId);
+    }
   }
 
   /**
@@ -773,7 +871,7 @@ export class Engine {
   }
 
   /**
-   * Step three of a dispatch. Returns the harness run id to abort when the
+   * Step three of a dispatch. Returns the harness turn to abort when the
    * stage run moved on while the turn was being started.
    */
   private recordTurn(
@@ -781,7 +879,7 @@ export class Engine {
     prep: Prepared,
     adapterRunId: string,
     emit: EmitFn,
-  ): string | undefined {
+  ): AbortRequest | undefined {
     const row = t.getStageRun(prep.stageRunId);
     if (!row) return undefined;
     const run = t.getRun(row.runId);
@@ -848,6 +946,12 @@ export class Engine {
           dispatchedAt: now,
         },
       );
+    } else {
+      t.updateStageRunIf(
+        row.stageRunId,
+        { state: row.state, attempt: row.attempt },
+        { abortRunId: adapterRunId },
+      );
     }
     t.appendTransition({
       runId: row.runId,
@@ -860,7 +964,7 @@ export class Engine {
       at: now,
       detail,
     });
-    return completed ? undefined : adapterRunId;
+    return completed ? undefined : { stageRunId: row.stageRunId, adapterRunId };
   }
 
   /** The first turn's brief, or why it can never be rendered. */
@@ -906,8 +1010,10 @@ export class Engine {
 
   // --- plumbing -----------------------------------------------------------
 
-  private txCtx(t: StoreTx, emit: EmitFn): TxCtx {
-    return { t, pinned: this.pinned, now: this.clock.now(), emit };
+  private txCtx(t: StoreTx, emit: EmitFn, actor?: string): TxCtx {
+    const c: TxCtx = { t, pinned: this.pinned, now: this.clock.now(), emit };
+    if (actor !== undefined) c.actor = actor;
+    return c;
   }
 
   private ctx(t: StoreTx, run: RunRow, emit: EmitFn): RunCtx {

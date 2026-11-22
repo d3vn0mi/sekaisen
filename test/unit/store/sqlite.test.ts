@@ -4,7 +4,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Definition } from "../../../src/format/types.js";
-import { MIGRATIONS, SCHEMA_VERSION } from "../../../src/store/migrations.js";
+import { SCHEMA_VERSION } from "../../../src/store/migrations.js";
 import { openSqliteStore } from "../../../src/store/sqlite.js";
 import type {
   NewStageRun,
@@ -58,6 +58,7 @@ const stageRun = (over: Partial<NewStageRun> = {}): NewStageRun => ({
   runtime: null,
   waitReason: null,
   wakeAt: null,
+  abortRunId: null,
   ...over,
 });
 
@@ -789,5 +790,40 @@ describe("guards", () => {
     const b = open(file);
     a.tx((t) => seed(t));
     b.tx((t) => expect(t.getRun("r1")?.runId).toBe("r1"));
+  });
+});
+
+describe("abort requests", () => {
+  it("lists stage runs with a turn still to abort, and round-trips the column", () => {
+    const store = open();
+    store.tx((t) => {
+      seed(t);
+      t.insertStageRun(stageRun({ stageRunId: "a", stage: "a" }));
+      t.insertStageRun(
+        stageRun({ stageRunId: "b", stage: "b", abortRunId: "h_1" }),
+      );
+      const ids = (rows: StageRunRow[]) => rows.map((r) => r.stageRunId);
+      expect(ids(t.listStageRuns({ abortRequested: true, limit: 10 }))).toEqual(
+        ["b"],
+      );
+      expect(t.getStageRun("b")?.abortRunId).toBe("h_1");
+      expect(
+        t.updateStageRunIf(
+          "a",
+          { state: "submitted", attempt: 1 },
+          { abortRunId: "h_2" },
+        ),
+      ).toBe(true);
+      expect(
+        t.updateStageRunIf(
+          "b",
+          { state: "submitted", attempt: 1 },
+          { abortRunId: null },
+        ),
+      ).toBe(true);
+      expect(ids(t.listStageRuns({ abortRequested: true, limit: 10 }))).toEqual(
+        ["a"],
+      );
+    });
   });
 });
