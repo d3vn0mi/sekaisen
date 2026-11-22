@@ -20,9 +20,16 @@ export interface Capabilities {
 
 export interface StartTurn {
   agent: string;
+  /**
+   * Chosen by the engine and stable for the stage's session policy:
+   * `run:<runId>:<agent>` for `session: run`, `project:<project>:<agent>` for
+   * `session: project`. The adapter maps it to a session of its harness; the
+   * same key must reach the same session.
+   */
   sessionKey: string;
   message: string;
   capMs: number;
+  /** Repeated only for a turn the harness may already have accepted; it must not start twice. */
   idempotencyKey: string;
   /** The completion tools; a harness that grants tools per turn grants these. */
   tools: string[];

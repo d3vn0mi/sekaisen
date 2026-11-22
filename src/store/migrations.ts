@@ -15,6 +15,7 @@ export const MIGRATIONS: readonly string[] = [
     hash        TEXT NOT NULL,
     version     INTEGER NOT NULL,
     parsed_json TEXT NOT NULL,
+    briefs_json TEXT NOT NULL,
     loaded_at   INTEGER NOT NULL,
     PRIMARY KEY (pipeline_id, hash)
   );

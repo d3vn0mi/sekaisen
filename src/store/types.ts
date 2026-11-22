@@ -30,6 +30,8 @@ export interface DefinitionRow {
   hash: string;
   version: number;
   parsed: Definition;
+  /** Brief texts by the path the definition names, so a pinned run renders its own version. */
+  briefs: Record<string, string>;
   loadedAt: number;
 }
 
@@ -190,6 +192,8 @@ export interface StoreTx {
   putLimit(row: LimitRow): void;
   clearLimit(scope: string, key: string): void;
 
+  /** The most recently completed stage run of `stage` in the run. */
+  latestCompleted(runId: string, stage: string): StageRunRow | undefined;
   /** Highest attempt number used for `stage` in the run; 0 when none. */
   maxAttempt(runId: string, stage: string): number;
   /** Highest visit number recorded for `stage` in the run; 0 when none. */

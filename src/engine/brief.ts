@@ -37,7 +37,8 @@ Outcomes:
 If you cannot finish in this turn, call \`stage_progress\` with \`token\` and \`note\` to save a checkpoint. A later turn starts from your note.
 `;
 
-function fieldsShorthand(schema: JsonSchema | undefined): string {
+/** A schema's fields as `name: type` pairs, `?` marking optional ones. */
+export function fieldsShorthand(schema: JsonSchema | undefined): string {
   const props = schema?.properties ?? {};
   const required = new Set(schema?.required ?? []);
   const parts = Object.entries(props).map(([name, s]) => {

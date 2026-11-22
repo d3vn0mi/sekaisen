@@ -62,6 +62,7 @@ const seed = (t: StoreTx, over: Partial<RunRow> = {}) => {
     hash: "h1",
     version: 1,
     parsed: def,
+    briefs: { "briefs/a.md": "A" },
     loadedAt: 1,
   });
   t.insertRun(run(over));
@@ -298,11 +299,15 @@ describe("rows", () => {
     store.tx((t) => {
       seed(t);
       expect(t.getDefinition("demo", "h1")?.parsed).toEqual(def);
+      expect(t.getDefinition("demo", "h1")?.briefs).toEqual({
+        "briefs/a.md": "A",
+      });
       t.putDefinition({
         pipelineId: "demo",
         hash: "h1",
         version: 9,
         parsed: def,
+        briefs: {},
         loadedAt: 99,
       });
       expect(t.getDefinition("demo", "h1")?.loadedAt).toBe(1);
@@ -522,6 +527,24 @@ describe("attempts, visits and turn keys", () => {
       expect(t.maxAttempt("r1", "draft")).toBe(3);
       expect(t.countVisits("r1", "draft")).toBe(2);
       expect(t.maxAttempt("r1", "other")).toBe(0);
+    });
+  });
+
+  it("latestCompleted returns the newest completed attempt of a stage", () => {
+    const store = open();
+    store.tx((t) => {
+      seed(t);
+      expect(t.latestCompleted("r1", "draft")).toBeUndefined();
+      const mk = (n: number, state: StageRunRow["state"], fields: unknown) =>
+        t.insertStageRun(
+          stageRun({ stageRunId: `s${n}`, attempt: n, state, fields }),
+        );
+      mk(1, "completed", { v: 1 });
+      mk(2, "completed", { v: 2 });
+      mk(3, "failed", { v: 3 });
+      mk(4, "working", null);
+      expect(t.latestCompleted("r1", "draft")?.fields).toEqual({ v: 2 });
+      expect(t.latestCompleted("r1", "other")).toBeUndefined();
     });
   });
 

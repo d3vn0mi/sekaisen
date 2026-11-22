@@ -163,6 +163,7 @@ function definitionFromRow(r: Row): DefinitionRow {
     hash: r.hash as string,
     version: r.version as number,
     parsed: fromJson(r.parsed_json) as DefinitionRow["parsed"],
+    briefs: fromJson(r.briefs_json) as DefinitionRow["briefs"],
     loadedAt: r.loaded_at as number,
   };
 }
@@ -222,12 +223,13 @@ class SqliteTx implements StoreTx {
   putDefinition(row: DefinitionRow): void {
     this.run(
       `INSERT OR IGNORE INTO definitions
-         (pipeline_id, hash, version, parsed_json, loaded_at)
-       VALUES (?, ?, ?, ?, ?)`,
+         (pipeline_id, hash, version, parsed_json, briefs_json, loaded_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
       row.pipelineId,
       row.hash,
       row.version,
       JSON.stringify(row.parsed),
+      JSON.stringify(row.briefs),
       row.loadedAt,
     );
   }
@@ -501,6 +503,17 @@ class SqliteTx implements StoreTx {
       outcome,
     );
     return Number(r?.n ?? 0);
+  }
+
+  latestCompleted(runId: string, stage: string): StageRunRow | undefined {
+    const r = this.get(
+      `SELECT * FROM stage_runs
+       WHERE run_id = ? AND stage = ? AND state = 'completed'
+       ORDER BY attempt DESC LIMIT 1`,
+      runId,
+      stage,
+    );
+    return r && stageRunFromRow(r);
   }
 
   maxAttempt(runId: string, stage: string): number {
