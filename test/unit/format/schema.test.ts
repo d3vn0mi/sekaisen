@@ -1,4 +1,7 @@
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { Ajv } from "ajv";
 import { describe, expect, test } from "vitest";
 import { parse } from "yaml";
@@ -77,5 +80,19 @@ describe("schema.json", () => {
       expect(validateJson(schema, doc).length).toBeGreaterThan(0);
       expect(validate(doc)).toBe(false);
     }
+  });
+
+  test("the build script copies schema.json next to the compiled loader", () => {
+    const dist = mkdtempSync(path.join(tmpdir(), "sekaisen-dist-"));
+    try {
+      execFileSync("node", ["scripts/copy-schema.mjs", dist]);
+      expect(readFileSync(path.join(dist, "format/schema.json"), "utf8")).toBe(
+        readFileSync(schemaUrl, "utf8"),
+      );
+    } finally {
+      rmSync(dist, { recursive: true, force: true });
+    }
+    const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+    expect(pkg.scripts.build).toContain("scripts/copy-schema.mjs");
   });
 });

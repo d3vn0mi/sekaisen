@@ -38,8 +38,12 @@ export interface LoadedDefinition {
 type Raw = Record<string, unknown>;
 
 /** Applied to agent stages when neither the stage nor the defaults give a retry. */
-const AGENT_RETRY: RetryPolicy = { max: 1, on: ["lost"] };
-const OTHER_RETRY: RetryPolicy = { max: 0, on: [] };
+const agentRetry = (): RetryPolicy => ({ max: 1, on: ["lost"] });
+const otherRetry = (): RetryPolicy => ({ max: 0, on: [] });
+const copyRetry = (r: RetryPolicy): RetryPolicy => ({
+  max: r.max,
+  on: [...r.on],
+});
 const RESERVED_TYPES = ["subpipeline", "parallel"];
 
 let cachedSchema: JsonSchema | undefined;
@@ -47,21 +51,12 @@ let cachedSchema: JsonSchema | undefined;
 /** The JSON Schema describing a definition file, as shipped in `schema.json`. */
 export function definitionSchema(): JsonSchema {
   if (cachedSchema) return cachedSchema;
-  // Next to this module when running from source, two levels up from `dist`.
-  const candidates = [
-    new URL("./schema.json", import.meta.url),
-    new URL("../../src/format/schema.json", import.meta.url),
-  ];
-  let lastError: unknown;
-  for (const url of candidates) {
-    try {
-      cachedSchema = JSON.parse(readFileSync(url, "utf8")) as JsonSchema;
-      return cachedSchema;
-    } catch (e) {
-      lastError = e;
-    }
-  }
-  throw lastError;
+  // `schema.json` sits next to this module: in `src` when running from
+  // source, in `dist` after the build copies it there.
+  cachedSchema = JSON.parse(
+    readFileSync(new URL("./schema.json", import.meta.url), "utf8"),
+  ) as JsonSchema;
+  return cachedSchema;
 }
 
 function isObject(v: unknown): v is Raw {
@@ -103,31 +98,32 @@ function nextOf(v: unknown): Next {
 }
 
 /**
- * Outcome fields are a full JSON Schema when they carry `type: object` (or a
- * list of types), otherwise the `name: type` shorthand.
+ * Outcome fields are the `name: type` shorthand when every value is a string;
+ * anything else is a full JSON Schema, which must describe an object.
  */
-function fieldsOf(v: unknown, where: string): JsonSchema {
-  if (isObject(v) && (v.type === "object" || Array.isArray(v.type))) {
-    const schema = v as JsonSchema;
+function fieldsOf(v: unknown, where: string, outcome: string): JsonSchema {
+  if (!isObject(v)) {
+    throw new Error(`${where}: fields must be an object`);
+  }
+  if (Object.values(v).every((spec) => typeof spec === "string")) {
     try {
-      checkSchema(schema);
+      return fieldsShorthandToSchema(v as Record<string, string>);
     } catch (e) {
       throw new Error(`${where}: ${(e as Error).message}`);
     }
-    return schema;
   }
-  const shorthand: Record<string, string> = {};
-  for (const [name, spec] of Object.entries(isObject(v) ? v : {})) {
-    if (typeof spec !== "string") {
-      throw new Error(`${where}: field ${name} must be a type name`);
-    }
-    shorthand[name] = spec;
+  if (v.type !== "object") {
+    throw new Error(
+      `outcome ${outcome}: fields schema must be an object schema`,
+    );
   }
+  const schema = v as JsonSchema;
   try {
-    return fieldsShorthandToSchema(shorthand);
+    checkSchema(schema);
   } catch (e) {
     throw new Error(`${where}: ${(e as Error).message}`);
   }
+  return schema;
 }
 
 function outcomesOf(
@@ -141,7 +137,11 @@ function outcomesOf(
     const outcome: Outcome = { next: nextOf(o.next) };
     if (o.fields !== undefined) {
       try {
-        outcome.fields = fieldsOf(o.fields, `${where}/outcomes/${name}/fields`);
+        outcome.fields = fieldsOf(
+          o.fields,
+          `${where}/outcomes/${name}/fields`,
+          name,
+        );
       } catch (e) {
         problems.push((e as Error).message);
       }
@@ -177,13 +177,16 @@ function stageOf(
         agent: raw.agent as string,
         session: (raw.session as "run" | "project" | undefined) ?? "run",
         brief: raw.brief as string,
-        deadline: duration(raw.deadline) ?? defaults.deadline ?? 0,
         turns: { max: (turns.max as number | undefined) ?? 1 },
-        retry: retryOf(raw.retry) ?? defaults.retry ?? { ...AGENT_RETRY },
+        retry:
+          retryOf(raw.retry) ??
+          (defaults.retry ? copyRetry(defaults.retry) : agentRetry()),
         outcomes: outcomesOf(raw.outcomes, where, problems),
       };
       const cap = duration(turns.cap);
       if (cap !== undefined) stage.turns.capMs = cap;
+      const deadline = duration(raw.deadline) ?? defaults.deadline;
+      if (deadline !== undefined) stage.deadline = deadline;
       if (isObject(raw.requires)) {
         stage.requires = { tools: (raw.requires.tools as string[]).slice() };
       }
@@ -206,7 +209,7 @@ function stageOf(
               ? { next: ot.next }
               : typeof ot.remind === "string"
                 ? { remind: parseDuration(ot.remind) }
-                : {},
+                : { remind: timeout },
         outcomes: outcomesOf(raw.outcomes, where, problems),
       };
       if (raw.who === "operator") stage.who = "operator";
@@ -230,7 +233,9 @@ function stageOf(
         type: "action",
         action: raw.action as string,
         next: raw.next as string,
-        retry: retryOf(raw.retry) ?? defaults.retry ?? { ...OTHER_RETRY },
+        retry:
+          retryOf(raw.retry) ??
+          (defaults.retry ? copyRetry(defaults.retry) : otherRetry()),
       };
       if (typeof raw.on_exhausted === "string") {
         stage.onExhausted = raw.on_exhausted;
@@ -404,7 +409,8 @@ export async function loadDefinition(file: string): Promise<LoadedDefinition> {
     const inside = path.relative(dir, target);
     if (
       path.isAbsolute(rel) ||
-      inside.startsWith("..") ||
+      inside === ".." ||
+      inside.startsWith(`..${path.sep}`) ||
       path.isAbsolute(inside)
     ) {
       problems.push(`brief ${rel}: must be inside the pipeline's folder`);

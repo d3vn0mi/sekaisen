@@ -26,7 +26,8 @@ export interface AgentStage {
   agent: string;
   session: "run" | "project";
   brief: string;
-  deadline: Duration;
+  /** Wall-clock budget for one attempt; undefined means no deadline. */
+  deadline?: Duration;
   turns: { max: number; capMs?: Duration };
   retry: RetryPolicy;
   requires?: { tools: string[] };

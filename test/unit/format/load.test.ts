@@ -235,4 +235,133 @@ describe("loadDefinition", () => {
       next: "done",
     });
   });
+
+  test("a full fields schema with properties and required is kept as is", async () => {
+    const file = await rewrite((y) =>
+      y.replace(
+        "fields: { reason: string }",
+        "fields: { type: object, properties: { reason: { type: string } }, required: [reason] }",
+      ),
+    );
+    const { def, problems } = await loadDefinition(file);
+    expect(problems).toEqual([]);
+    const draft = def.stages.draft;
+    if (draft?.type !== "agent") throw new Error("draft must be an agent");
+    expect(draft.outcomes.blocked?.fields).toEqual({
+      type: "object",
+      properties: { reason: { type: "string" } },
+      required: ["reason"],
+    });
+  });
+
+  test("a shorthand field named type stays shorthand", async () => {
+    const file = await rewrite((y) =>
+      y.replace("fields: { reason: string }", "fields: { type: object }"),
+    );
+    const { def, problems } = await loadDefinition(file);
+    expect(problems).toEqual([]);
+    const draft = def.stages.draft;
+    if (draft?.type !== "agent") throw new Error("draft must be an agent");
+    expect(draft.outcomes.blocked?.fields).toEqual({
+      type: "object",
+      properties: { type: { type: "object" } },
+      required: ["type"],
+      additionalProperties: false,
+    });
+  });
+
+  test("a full fields schema that is not an object schema is a problem", async () => {
+    for (const bad of [
+      '{ type: [string, "null"] }',
+      "{ properties: { a: { type: string } } }",
+      "{ oneOf: [{ type: object }] }",
+    ]) {
+      const file = await rewrite((y) =>
+        y.replace("fields: { reason: string }", `fields: ${bad}`),
+      );
+      const { problems } = await loadDefinition(file);
+      expect(problems).toContain(
+        "outcome blocked: fields schema must be an object schema",
+      );
+    }
+  });
+
+  test("retry policies are not shared between stages or with defaults", async () => {
+    const { def } = await loadDefinition(path.join(FIXTURE, "pipeline.yaml"));
+    const draft = def.stages.draft;
+    const check = def.stages.check;
+    if (draft?.type !== "agent" || check?.type !== "agent") throw new Error();
+    expect(draft.retry).not.toBe(def.defaults?.retry);
+    expect(draft.retry.on).not.toBe(def.defaults?.retry?.on);
+    expect(draft.retry.on).not.toBe(check.retry.on);
+    draft.retry.on.push("timeout");
+    expect(check.retry.on).toEqual(["no_result", "lost"]);
+    expect(def.defaults?.retry?.on).toEqual(["no_result", "lost"]);
+  });
+
+  test("without a deadline anywhere the stage has none", async () => {
+    const file = await rewrite((y) => y.replace("  deadline: 30m\n", ""));
+    const { def } = await loadDefinition(file);
+    const draft = def.stages.draft;
+    if (draft?.type !== "agent") throw new Error("draft must be an agent");
+    expect("deadline" in draft).toBe(false);
+  });
+
+  test("an empty on_timeout means remind after the timeout", async () => {
+    const file = await rewrite((y) =>
+      y.replace("on_timeout: { remind: 24h }", "on_timeout: {}"),
+    );
+    const { def, problems } = await loadDefinition(file);
+    expect(problems).toEqual([]);
+    const publish = def.stages.publish;
+    if (publish?.type !== "gate") throw new Error("publish must be a gate");
+    expect(publish.onTimeout).toEqual({ remind: 86_400_000 });
+  });
+
+  test("providers allow list, poll gate and wait until", async () => {
+    const file = await rewrite((y) =>
+      y
+        .replace(
+          "start: draft",
+          "providers: { allow: [demo.a, demo.b] }\nstart: draft",
+        )
+        .replace(
+          "    who: operator\n",
+          "    poll: { fact: demo.ready, every: 5m }\n",
+        )
+        .replace(
+          "  done: { type: end, status: completed }",
+          "  hold: { type: wait, until: demo.later, next: done }\n  done: { type: end, status: completed }",
+        ),
+    );
+    const { def, problems } = await loadDefinition(file);
+    expect(problems).toEqual([]);
+    expect(def.providers).toEqual({ allow: ["demo.a", "demo.b"] });
+    const publish = def.stages.publish;
+    if (publish?.type !== "gate") throw new Error("publish must be a gate");
+    expect(publish.poll).toEqual({ fact: "demo.ready", every: 300_000 });
+    expect(publish.who).toBeUndefined();
+    expect(def.stages.hold).toEqual({
+      type: "wait",
+      until: "demo.later",
+      next: "done",
+    });
+  });
+
+  test("a stage-level x- key is rejected", async () => {
+    const file = await rewrite((y) =>
+      y.replace("    agent: drafter\n", "    agent: drafter\n    x-note: hi\n"),
+    );
+    const { problems } = await loadDefinition(file);
+    expect(problems.some((p) => p.startsWith("/stages/draft"))).toBe(true);
+  });
+
+  test("a brief named like a parent-prefixed file inside the folder is allowed", async () => {
+    await writeFile(path.join(work, "..briefs.md"), "x\n");
+    const file = await rewrite((y) =>
+      y.replace("briefs/draft.md", "..briefs.md"),
+    );
+    const { problems } = await loadDefinition(file);
+    expect(problems).toEqual([]);
+  });
 });
