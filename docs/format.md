@@ -395,7 +395,8 @@ again:
 2. The token is known: it was handed to an attempt of an agent stage.
 3. Its attempt has not ended. A token of an attempt that failed (an earlier attempt, after a
    retry), was canceled, or whose deadline has passed (even before the engine has recorded the
-   timeout) is refused, and the refusal is logged as `completion_refused`.
+   timeout) is refused, and the refusal is logged as `completion_refused`: once per stage run, and
+   again only when the reason changes, so repeated calls with a dead token do not grow the log.
 4. When the harness says which agent is calling, it is the stage's agent.
 5. The attempt is not already completed. A repeat of the completion that was applied, with the
    same outcome and the same fields (key order aside), succeeds again and changes nothing; any
@@ -746,7 +747,7 @@ Stage events:
 | `cancel_action_completed` | `submitted` → `completed` | `engine` | The `on_cancel` action succeeded |
 | `cancel_action_failed` | `submitted` → `failed` | `engine` | The `on_cancel` action failed |
 | `orphaned_stage_run` | state → `canceled` | `engine` | A stage run was found live under a run that had ended |
-| `completion_refused`, `progress_refused` | state → state | `agent:<a>`, the calling agent when the harness names it | A completion tool was called for an attempt that had ended |
+| `completion_refused`, `progress_refused` | state → state | `agent:<a>`, the calling agent when the harness names it | A completion tool was called for an attempt that had ended (logged once per stage run, and again only when the reason changes) |
 | `abort_requested` | state → state | the actor of the timeout, the cancellation's caller, or `engine` | The engine will ask the harness to abort a turn |
 | `abort_settled` | state → state | `engine` | The harness answered the abort, or cannot abort |
 | `abort_abandoned` | state → state | `engine` | Five abort calls failed; the engine stops asking |

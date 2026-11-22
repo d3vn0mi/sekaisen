@@ -85,17 +85,30 @@ export function byToken(
     overdue || !["submitted", "working", "completed"].includes(row.state);
   if (ended) {
     const timedOut = overdue || row.ending === "timeout";
-    t.appendTransition({
-      runId: row.runId,
-      stageRunId: row.stageRunId,
-      fromState: row.state,
-      toState: row.state,
-      event: refusedEvent,
-      outcome: null,
-      actor: `agent:${callerAgent ?? stage.agent}`,
-      at: now,
-      detail: { reason: timedOut ? "attempt timed out" : "attempt ended" },
-    });
+    const reason = timedOut ? "attempt timed out" : "attempt ended";
+    // Logged once per stage run, and again only when the reason changes, so
+    // an agent that keeps calling with a dead token cannot grow the log.
+    const last = t
+      .transitions(row.runId)
+      .findLast(
+        (x) => x.stageRunId === row.stageRunId && x.event === refusedEvent,
+      );
+    const lastReason = isPlainObject(last?.detail)
+      ? last.detail.reason
+      : undefined;
+    if (lastReason !== reason) {
+      t.appendTransition({
+        runId: row.runId,
+        stageRunId: row.stageRunId,
+        fromState: row.state,
+        toState: row.state,
+        event: refusedEvent,
+        outcome: null,
+        actor: `agent:${callerAgent ?? stage.agent}`,
+        at: now,
+        detail: { reason },
+      });
+    }
     return refused(
       timedOut
         ? "this attempt timed out; its deadline passed"

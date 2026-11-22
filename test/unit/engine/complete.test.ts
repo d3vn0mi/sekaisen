@@ -163,6 +163,43 @@ describe("stage_complete", () => {
     ]);
   });
 
+  it("a dead token's refusals are logged once per stage run, and again when the reason changes", async () => {
+    const r = await make();
+    const { runId, token } = await started(r);
+    const end = (ending: "turn_error" | "timeout") =>
+      r.store.tx((t) => {
+        const row = t.listStageRuns({ runId, limit: 10 })[0];
+        if (!row) throw new Error("no row");
+        t.updateStageRunIf(
+          row.stageRunId,
+          { state: row.state, attempt: row.attempt },
+          { state: "failed", ending },
+        );
+      });
+    const refusals = () =>
+      r.engine
+        .status(runId)
+        .transitions.filter((t) => t.event.endsWith("_refused"))
+        .map((t) => [t.event, (t.detail as { reason: string }).reason]);
+    end("turn_error");
+    const params = { token, outcome: "blocked", fields: { reason: "x" } };
+    for (let i = 0; i < 3; i++) {
+      expect((await r.engine.complete(params)).ok).toBe(false);
+      expect((await r.engine.progress({ token, note: "n" })).ok).toBe(false);
+    }
+    expect(refusals()).toEqual([
+      ["completion_refused", "attempt ended"],
+      ["progress_refused", "attempt ended"],
+    ]);
+    end("timeout");
+    for (let i = 0; i < 2; i++) await r.engine.complete(params);
+    expect(refusals()).toEqual([
+      ["completion_refused", "attempt ended"],
+      ["progress_refused", "attempt ended"],
+      ["completion_refused", "attempt timed out"],
+    ]);
+  });
+
   it("a wrong caller is refused after the attempt completed", async () => {
     const r = await make();
     const { token } = await started(r);

@@ -196,7 +196,7 @@ silent wrong turn.
   and the same fields, succeeds again and reports `applied: "already"`. A repeat with a different
   outcome or different fields is refused.
 - **Dead tokens.** A token from an earlier attempt, or from one past its deadline, is refused and
-  logged, never applied.
+  never applied. The refusal is logged once per stage run, and again only when its reason changes.
 
 `stage_progress` saves a checkpoint (what is done, what is next, where the work lives, up to 64 KiB)
 when the agent cannot finish in this turn. If the turn then ends normally and the stage has turns
