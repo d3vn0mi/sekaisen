@@ -17,3 +17,12 @@ export function descend(value: unknown, path: string): unknown {
 export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+/** Longest error text kept in a transition, a limit's reason or a gate row. */
+export const MAX_ERROR_CHARS = 1000;
+
+export function clip(text: string): string {
+  return text.length > MAX_ERROR_CHARS
+    ? `${text.slice(0, MAX_ERROR_CHARS)}…`
+    : text;
+}

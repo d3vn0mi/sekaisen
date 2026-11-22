@@ -22,6 +22,7 @@ import { turnKey } from "../store/types.js";
 import { advance, ENGINE_ACTOR, enter, type RunCtx } from "./advance.js";
 import { outcomesList, renderBrief, renderContinuation } from "./brief.js";
 import { realTimers, type Timers, withTimeout } from "./calls.js";
+import { cancelRun } from "./cancel.js";
 import { type Clock, systemClock } from "./clock.js";
 import {
   byToken,
@@ -39,9 +40,12 @@ import {
   type EngineEvent,
   type EngineEvents,
 } from "./events.js";
+import { resolveGate } from "./gates.js";
+import { invoke, rejectStageRun, stageFields } from "./hostcalls.js";
 import { newRunId } from "./ids.js";
 import { deadlinePassed } from "./lifecycle.js";
 import { type Pinned, PinnedDefinitions } from "./pinned.js";
+import { recordCallError, recordCallResult, stepStage } from "./stages.js";
 import { deriveToken, hashToken, MIN_TOKEN_SECRET_BYTES } from "./tokens.js";
 import {
   admission,
@@ -93,9 +97,10 @@ export interface EngineOptions {
    */
   tokenSecret?: Uint8Array;
   /**
-   * Longest the engine waits on any one harness call, in milliseconds;
-   * 30000 by default. A call that takes longer is treated as one that
-   * failed, so a hung harness cannot stall the tick.
+   * Longest the engine waits on any one harness call or host function (a
+   * check, action or fact), in milliseconds; 30000 by default. A call that
+   * takes longer is treated as one that failed, so a hung harness or host
+   * function cannot stall the tick.
    */
   adapterCallTimeoutMs?: number;
   /** The timers behind `adapterCallTimeoutMs`; real ones by default. */
@@ -369,17 +374,40 @@ export class Engine {
     });
   }
 
-  async cancel(_runId: string, _actor: string): Promise<void> {
-    throw new Error("cancel is not supported by this engine version");
+  /**
+   * Cancels a run and its live stage run, asks the harness to abort a turn
+   * in flight where it can, and submits the definition's `onCancel` action
+   * for the tick to run once. Throws when the run has already ended.
+   */
+  async cancel(runId: string, actor: string): Promise<void> {
+    const abort = this.commit((t, emit) =>
+      cancelRun(this.txCtx(t, emit), runId, actor),
+    );
+    if (abort === undefined) return;
+    let caps: Capabilities;
+    try {
+      caps = await this.capabilities();
+    } catch {
+      this.pendingAborts.push(abort);
+      return;
+    }
+    await this.abort(abort, caps);
   }
 
+  /**
+   * An operator's answer to a gate: records `by` in the gate row and as the
+   * transition's actor, then moves the run on by `outcome`. Throws for an
+   * outcome the gate does not declare or a gate already resolved.
+   */
   async resolveGate(
-    _stageRunId: string,
-    _outcome: string,
-    _by: string,
-    _note?: string,
+    stageRunId: string,
+    outcome: string,
+    by: string,
+    note?: string,
   ): Promise<void> {
-    throw new Error("gates are not supported by this engine version");
+    this.commit((t, emit) =>
+      resolveGate(this.txCtx(t, emit), stageRunId, outcome, by, note),
+    );
   }
 
   status(runId: string): RunStatusView {
@@ -436,9 +464,16 @@ export class Engine {
         this.report(err);
       }
     }
+    // The stages the tick runs itself need nothing from the harness.
+    await this.runStages();
     if (!caps) return;
+    // Agent stage runs only: every other stage type has a wake time.
     const submitted = this.store.tx((t) =>
-      t.listStageRuns({ state: ["submitted"], limit: TICK_BATCH }),
+      t.listStageRuns({
+        state: ["submitted"],
+        wakes: false,
+        limit: TICK_BATCH,
+      }),
     );
     for (const row of submitted) {
       try {
@@ -447,6 +482,45 @@ export class Engine {
         this.report(err);
       }
     }
+  }
+
+  /**
+   * Checks, actions, waits and gates whose wake time has come, earliest
+   * first. Kept apart from agent dispatch: they take no lane.
+   */
+  private async runStages(): Promise<void> {
+    const due = this.store.tx((t) =>
+      t.listStageRuns({
+        state: ["submitted", "working", "input_required"],
+        wakeBy: this.clock.now(),
+        limit: TICK_BATCH,
+      }),
+    );
+    for (const row of due) {
+      try {
+        await this.runStage(row);
+      } catch (err) {
+        this.report(err);
+      }
+    }
+  }
+
+  /** One due stage run: prepare in a transaction, call the host, record in another. */
+  private async runStage(seen: StageRunRow): Promise<void> {
+    const call = this.commit((t, emit) =>
+      stepStage({ ...this.txCtx(t, emit), registry: this.o.registry }, seen),
+    );
+    if (!call) return;
+    let value: unknown;
+    try {
+      value = await this.call(`${call.kind} ${call.name}`, () => invoke(call));
+    } catch (err) {
+      this.commit((t, emit) => recordCallError(this.txCtx(t, emit), call, err));
+      return;
+    }
+    this.commit((t, emit) =>
+      recordCallResult(this.txCtx(t, emit), call, value),
+    );
   }
 
   /** The harness's capabilities, read once; a failed read is asked again. */
@@ -460,7 +534,7 @@ export class Engine {
     return this.caps;
   }
 
-  /** A harness call bounded by `adapterCallTimeoutMs`. */
+  /** A harness or host call bounded by `adapterCallTimeoutMs`. */
   private call<T>(name: string, fn: () => Promise<T>): Promise<T> {
     return withTimeout(name, fn, this.callTimeoutMs, this.timers);
   }
@@ -561,7 +635,9 @@ export class Engine {
     stageRunId: string,
     caps: Capabilities,
   ): Promise<void> {
-    const prep = this.store.tx((t) => this.prepare(t, stageRunId, caps));
+    const prep = this.commit((t, emit) =>
+      this.prepare(t, stageRunId, caps, emit),
+    );
     if (!prep) return;
 
     let adapterRunId: string;
@@ -611,6 +687,7 @@ export class Engine {
     t: StoreTx,
     stageRunId: string,
     caps: Capabilities,
+    emit: EmitFn,
   ): Prepared | undefined {
     const row = t.getStageRun(stageRunId);
     if (row?.state !== "submitted") return undefined;
@@ -628,6 +705,18 @@ export class Engine {
     // same one, and a continuation carries the first turn's token.
     const token = deriveToken(this.tokenSecret, row.idempotencyKey);
     const hash = hashToken(token);
+    let text: string;
+    try {
+      text =
+        row.turnsUsed === 0
+          ? this.renderFor(t, run, pinned, stage, token)
+          : renderContinuation(row.progressNote, token, stage.outcomes);
+    } catch (err) {
+      // A brief that cannot be rendered never will be: refuse the stage run
+      // rather than try it again on every tick.
+      rejectStageRun(this.ctx(t, run, emit), row, errorMessage(err));
+      return undefined;
+    }
     // The hash is set when the attempt is first dispatched. A different one
     // means the secret changed (a restart without a configured secret). A
     // turn the harness may already hold carries the old token, so the new
@@ -664,10 +753,6 @@ export class Engine {
         detail: { fromSeq: row.dispatchSeq, toSeq: dispatchSeq },
       });
     }
-    const text =
-      row.turnsUsed === 0
-        ? this.renderFor(t, run, pinned, stage, token)
-        : renderContinuation(row.progressNote, token, stage.outcomes);
     return {
       stageRunId,
       attempt: row.attempt,
@@ -782,15 +867,10 @@ export class Engine {
     if (template === undefined) {
       throw new Error(`brief ${stage.brief} is missing from the definition`);
     }
-    const stages: Record<string, Record<string, unknown>> = {};
-    for (const id of Object.keys(pinned.def.stages)) {
-      const done = t.latestCompleted(run.runId, id);
-      if (done && isPlainObject(done.fields)) stages[id] = done.fields;
-    }
     return renderBrief(template, {
       inputs: run.inputs,
       runId: run.runId,
-      stages,
+      stages: stageFields(t, run.runId, pinned.def),
       outcomes: stage.outcomes,
       token,
     });

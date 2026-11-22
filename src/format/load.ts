@@ -291,6 +291,13 @@ function stageRules(id: string, stage: Raw): string[] {
     } else if (!who && !poll) {
       out.push(`stage ${id}: a gate needs who: operator or poll`);
     }
+    if (
+      poll &&
+      isObject(stage.outcomes) &&
+      Object.keys(stage.outcomes).length !== 1
+    ) {
+      out.push(`stage ${id}: a poll gate declares exactly one outcome`);
+    }
   }
   return out;
 }

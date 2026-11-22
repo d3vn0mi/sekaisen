@@ -98,6 +98,12 @@ export interface StageRunRow {
   heldSince: number | null;
   runtime: RuntimeInfo | null;
   waitReason: string | null;
+  /**
+   * When the tick next runs this stage run itself: set for every stage type
+   * but `agent` while the stage run is live (a new check or action, a wait's
+   * wake time, a gate's next poll, reminder or timeout); null otherwise.
+   */
+  wakeAt: number | null;
 }
 
 export interface TransitionRow {
@@ -122,6 +128,12 @@ export interface GateRow {
   resolvedAt: number | null;
   prompt: string | null;
   outcomes: string[] | null;
+  /** A poll gate's next poll; null for an operator gate. */
+  pollAt: number | null;
+  /** Polls in a row whose fact threw; 0 after any poll that answered. */
+  pollFailures: number;
+  /** The error text of the last poll that threw. */
+  pollError: string | null;
 }
 
 export interface LimitRow {
@@ -134,6 +146,15 @@ export interface LimitRow {
 
 /** A stage run as a caller supplies it; the store adds the idempotency key. */
 export type NewStageRun = Omit<StageRunRow, "idempotencyKey">;
+
+/** How the store keys a new stage run. */
+export interface InsertStageRunOptions {
+  /**
+   * Key the row `${runId}:cancel` instead of by attempt: the one run of the
+   * definition's cancel action. The key is unique, so it runs once per run.
+   */
+  cancelAction?: boolean;
+}
 
 /** Columns a compare-and-set may change on a run. */
 export type RunPatch = Partial<
@@ -180,14 +201,21 @@ export interface StoreTx {
   ): boolean;
 
   /** The store derives `idempotencyKey` from run, stage and attempt. */
-  insertStageRun(row: NewStageRun): void;
+  insertStageRun(row: NewStageRun, opts?: InsertStageRunOptions): void;
   getStageRun(stageRunId: string): StageRunRow | undefined;
   /** The newest stage run of the run that is submitted, working or input_required. */
   liveStageRun(runId: string): StageRunRow | undefined;
-  /** Oldest first. `inFlight` keeps only stage runs with a turn in flight. */
+  /**
+   * Oldest first. `inFlight` keeps only stage runs with a turn in flight.
+   * `wakes: false` keeps only stage runs without a wake time (agent stages).
+   * `wakeBy` keeps only stage runs whose wake time is at or before it, and
+   * orders them by wake time, earliest first.
+   */
   listStageRuns(filter: {
     state?: StageRunState[];
     inFlight?: boolean;
+    wakes?: false;
+    wakeBy?: number;
     limit: number;
   }): StageRunRow[];
   /** False when the stage run no longer matches `expect`; the caller re-reads. */

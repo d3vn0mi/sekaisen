@@ -10,7 +10,7 @@ import {
   type LoadedDefinition,
   loadDefinition,
 } from "../../../src/format/load.js";
-import type { Definition } from "../../../src/format/types.js";
+import type { Definition, Stage } from "../../../src/format/types.js";
 import { createRegistry } from "../../../src/host/registry.js";
 import { openSqliteStore } from "../../../src/store/sqlite.js";
 import type { Store } from "../../../src/store/types.js";
@@ -86,4 +86,23 @@ export async function variant(
   const briefs = { ...base.briefs };
   edit(def, briefs);
   return { ...base, hash, def, briefs };
+}
+
+/** A loaded definition written inline, already in its parsed shape. */
+export function inline(
+  def: Partial<Definition> & {
+    id: string;
+    start: string;
+    stages: Record<string, Stage>;
+  },
+  briefs: Record<string, string> = {},
+): LoadedDefinition {
+  return {
+    file: `${def.id}/pipeline.yaml`,
+    dir: def.id,
+    def: { format: 1, version: 1, providers: "fleet", extensions: {}, ...def },
+    hash: `inline-${def.id}`,
+    briefs,
+    problems: [],
+  };
 }

@@ -4,14 +4,18 @@ import type { JsonSchema } from "../format/jsonschema.js";
 /** The outcomes of a stage as the brief needs them: names and field schemas. */
 export type BriefOutcomes = Record<string, { fields?: JsonSchema }>;
 
-export interface BriefData {
+/** What a placeholder can name: run values and fields of earlier stages. */
+export interface TextData {
   /** The run's inputs. */
   inputs: unknown;
   runId: string;
   /** Fields recorded by earlier stages, by stage id. */
   stages: Record<string, Record<string, unknown>>;
-  /** Outcomes of the stage being briefed. */
+  /** Outcomes of the stage the text is for. */
   outcomes: BriefOutcomes;
+}
+
+export interface BriefData extends TextData {
   /** The plain completion token, shown to the agent once per turn. */
   token: string;
 }
@@ -104,7 +108,7 @@ function show(value: unknown): string {
   );
 }
 
-function resolve(name: string, data: BriefData): string {
+function resolve(name: string, data: TextData): string {
   const [head = "", ...rest] = name.split(".");
   if (name === "run.id") return data.runId;
   if (name === "stage.outcomes") return outcomesList(data.outcomes);
@@ -116,14 +120,20 @@ function resolve(name: string, data: BriefData): string {
 }
 
 /**
- * Fills a brief's placeholders and appends the footer. Values are inserted as
- * they are: briefs are Markdown for an agent, not HTML. Substituted text is
- * not scanned again.
+ * Fills a text's `{{...}}` placeholders: a brief's body, a gate prompt, a
+ * wait's `until`. Values are inserted as they are (the texts are Markdown or
+ * plain text, not HTML); an unset value reads `(unset: name)`. Substituted
+ * text is not scanned again.
  */
-export function renderBrief(template: string, data: BriefData): string {
-  const body = template.replace(PLACEHOLDER, (_m, name: string) =>
+export function renderText(template: string, data: TextData): string {
+  return template.replace(PLACEHOLDER, (_m, name: string) =>
     resolve(name.trim(), data),
   );
+}
+
+/** Fills a brief's placeholders and appends the footer. */
+export function renderBrief(template: string, data: BriefData): string {
+  const body = renderText(template, data);
   return `${body.trimEnd()}\n\n${footer(data.token, data.outcomes)}`;
 }
 

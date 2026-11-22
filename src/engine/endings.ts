@@ -1,4 +1,9 @@
-import type { AgentStage, Definition, RetryEnding } from "../format/types.js";
+import type {
+  Definition,
+  RetryEnding,
+  RetryPolicy,
+  Stage,
+} from "../format/types.js";
 import type { StageRunPatch, StageRunRow } from "../store/types.js";
 import {
   ENGINE_ACTOR,
@@ -19,10 +24,26 @@ import { pausedReason } from "./providers.js";
 
 type Detail = Record<string, unknown>;
 
+/** How a failed attempt of a stage goes on: its retries, then where it exhausts to. */
+export interface AttemptPolicy {
+  retry: RetryPolicy;
+  onExhausted?: string;
+}
+
+/** The retry policy of a stage type that declares none. */
+export const NO_RETRY: RetryPolicy = { max: 0, on: [] };
+
+/** The attempt policy of any stage: its own for agents and actions, no retry otherwise. */
+export function policyOf(stage: Stage): AttemptPolicy {
+  return stage.type === "agent" || stage.type === "action"
+    ? stage
+    : { retry: NO_RETRY };
+}
+
 /** Where a stage goes when its retries are used up: `onExhausted`, else the first `failed` end. */
 export function exhaustedTarget(
   def: Definition,
-  stage: AgentStage,
+  stage: AttemptPolicy,
 ): string | undefined {
   if (stage.onExhausted !== undefined) return stage.onExhausted;
   return Object.entries(def.stages).find(
@@ -32,36 +53,44 @@ export function exhaustedTarget(
 
 /** True when `ending` may retry the stage once more. */
 export function canRetry(
-  stage: AgentStage,
+  stage: AttemptPolicy,
   row: StageRunRow,
-  ending: RetryEnding,
+  ending: RetryEnding | null,
 ): boolean {
-  return stage.retry.on.includes(ending) && row.retryIndex < stage.retry.max;
+  return (
+    ending !== null &&
+    stage.retry.on.includes(ending) &&
+    row.retryIndex < stage.retry.max
+  );
 }
 
 /**
  * Ends the attempt `failed` with `ending`, then either submits a retry (a
  * new row in the same visit) or takes the stage's exhaustion edge. An
- * engine-classified ending never picks one of the agent's outcomes.
+ * engine-classified ending never picks one of the stage's outcomes. The
+ * transition is named after the ending unless `event` names it; a null
+ * ending (the stage itself is wrong, not its run) is never retried.
  */
 export function endAttempt(
   ctx: RunCtx,
   row: StageRunRow,
-  stage: AgentStage,
-  ending: RetryEnding,
+  stage: AttemptPolicy,
+  ending: RetryEnding | null,
   patch: StageRunPatch,
   detail: Detail,
+  event: string = ending ?? "stage_failed",
 ): void {
   const { t, now } = ctx;
   move(ctx, row, "failed", {
     ...patch,
     state: "failed",
-    ending,
+    ...(ending === null ? {} : { ending }),
     endedAt: now,
     dispatchedAt: null,
     waitReason: null,
+    wakeAt: null,
   });
-  const draft = transition(row, "failed", ending);
+  const draft = transition(row, "failed", event);
   if (canRetry(stage, row, ending)) {
     const attempt = t.maxAttempt(row.runId, row.stage) + 1;
     append(ctx, draft, { ...detail, retry: { attempt } });
@@ -140,7 +169,7 @@ export function pauseAttempt(
   });
 }
 
-function move(
+export function move(
   ctx: RunCtx,
   row: StageRunRow,
   to: StageRunRow["state"],
@@ -165,7 +194,7 @@ function move(
   });
 }
 
-function transition(
+export function transition(
   row: StageRunRow,
   to: StageRunRow["state"],
   event: string,
@@ -181,7 +210,11 @@ function transition(
   };
 }
 
-function append(ctx: RunCtx, draft: TransitionDraft, detail: Detail): void {
+export function append(
+  ctx: RunCtx,
+  draft: TransitionDraft,
+  detail: Detail,
+): void {
   ctx.t.appendTransition({
     ...draft,
     runId: ctx.run.runId,

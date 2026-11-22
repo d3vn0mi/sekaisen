@@ -25,6 +25,7 @@ import {
   providerPause,
   refusedProvider,
 } from "./providers.js";
+import { clip } from "./values.js";
 
 /**
  * The tick's decisions about turns, each the body of one transaction. The
@@ -46,9 +47,6 @@ export interface TickCtx extends TxCtx {
 }
 
 export type EndedOutcome = Extract<RunOutcome, { state: "ended" }>;
-
-/** Longest error text kept in a transition or a limit's reason. */
-const MAX_ERROR_CHARS = 1000;
 
 /**
  * Records the end of the turn `seen` had in flight. On a completed stage run
@@ -191,8 +189,15 @@ export function admission(
   const run = c.t.getRun(row.runId);
   if (run?.status !== "working") return undefined;
   const def = c.pinned.of(c.t, run).def;
-  if (def.stages[row.stage]?.type !== "agent") return undefined;
   const expect = { state: "submitted" as const, attempt: row.attempt };
+  if (def.stages[row.stage]?.type !== "agent") {
+    // Every other stage type is the tick's own; a row without a wake time
+    // (written before stage runs had one) is handed to it.
+    if (row.wakeAt === null) {
+      c.t.updateStageRunIf(row.stageRunId, expect, { wakeAt: c.now });
+    }
+    return undefined;
+  }
   const reason = providerPause(
     row,
     def.providers,
@@ -273,10 +278,4 @@ function current(
     stage,
     ctx: { t: c.t, pinned, run, now: c.now, emit: c.emit },
   };
-}
-
-function clip(text: string): string {
-  return text.length > MAX_ERROR_CHARS
-    ? `${text.slice(0, MAX_ERROR_CHARS)}…`
-    : text;
 }

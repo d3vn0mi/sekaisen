@@ -2,6 +2,7 @@ import type { Next, Stage } from "../format/types.js";
 import { evalGuard, type GuardContext } from "../guard/eval.js";
 import { type GuardAst, parseGuard } from "../guard/parse.js";
 import type {
+  NewStageRun,
   RunPatch,
   RunRow,
   RunStatus,
@@ -148,20 +149,19 @@ export function enter(ctx: RunCtx, stageId: string, actor: string): void {
 }
 
 /**
- * Inserts the next attempt of `stageId` as a submitted stage run: a new
- * visit with retry index 0, or a retry within `visit`.
+ * The next attempt of `stageId` as a new submitted row: a new visit with
+ * retry index 0, or a retry within `visit`.
  */
-export function submit(
+export function newAttempt(
   ctx: RunCtx,
   stageId: string,
   visit: number,
   retryIndex: number,
-  actor: string,
-): void {
+): NewStageRun {
   const { t, run, now } = ctx;
-  const stageRunId = newStageRunId();
-  t.insertStageRun({
-    stageRunId,
+  const type = ctx.pinned.def.stages[stageId]?.type;
+  return {
+    stageRunId: newStageRunId(),
     runId: run.runId,
     stage: stageId,
     attempt: t.maxAttempt(run.runId, stageId) + 1,
@@ -186,10 +186,25 @@ export function submit(
     heldSince: null,
     runtime: null,
     waitReason: null,
-  });
+    // The tick runs every other stage type itself, starting now.
+    wakeAt: type === "agent" ? null : now,
+  };
+}
+
+/** Inserts the next attempt of `stageId` (see `newAttempt`) and makes it the run's current stage. */
+export function submit(
+  ctx: RunCtx,
+  stageId: string,
+  visit: number,
+  retryIndex: number,
+  actor: string,
+): void {
+  const { t, run, now } = ctx;
+  const row = newAttempt(ctx, stageId, visit, retryIndex);
+  t.insertStageRun(row);
   t.appendTransition({
     runId: run.runId,
-    stageRunId,
+    stageRunId: row.stageRunId,
     fromState: null,
     toState: "submitted",
     event: "stage_submitted",
@@ -201,7 +216,7 @@ export function submit(
   moveRun(t, run, { currentStage: stageId, updatedAt: now });
   ctx.emit("stage_changed", {
     runId: run.runId,
-    stageRunId,
+    stageRunId: row.stageRunId,
     stage: stageId,
     from: null,
     to: "submitted",
@@ -235,6 +250,22 @@ export function endRun(
     detail,
   });
   ctx.emit("run_ended", { runId: run.runId, status, stage: stageId });
+}
+
+/**
+ * Sets the run's status while it waits on its live stage (`working`, or
+ * `input_required` on an operator gate) and returns a context on the run as
+ * it now is, so later moves compare against the new status.
+ */
+export function withRunStatus(
+  ctx: RunCtx,
+  status: "working" | "input_required",
+): RunCtx {
+  const current = ctx.t.getRun(ctx.run.runId) ?? ctx.run;
+  if (current.status === status) return { ...ctx, run: current };
+  moveRun(ctx.t, current, { status, updatedAt: ctx.now });
+  const run = ctx.t.getRun(current.runId) ?? { ...current, status };
+  return { ...ctx, run };
 }
 
 /** Ends the run `failed` where it stands, with `event` saying why. */

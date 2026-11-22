@@ -104,6 +104,15 @@ export const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (scope, key)
   );
   `,
+  `
+  ALTER TABLE stage_runs ADD COLUMN wake_at INTEGER;
+  CREATE INDEX stage_runs_wake ON stage_runs (wake_at)
+    WHERE wake_at IS NOT NULL;
+
+  ALTER TABLE gates ADD COLUMN poll_at INTEGER;
+  ALTER TABLE gates ADD COLUMN poll_failures INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE gates ADD COLUMN poll_error TEXT;
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

@@ -4,7 +4,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Definition } from "../../../src/format/types.js";
-import { SCHEMA_VERSION } from "../../../src/store/migrations.js";
+import { MIGRATIONS, SCHEMA_VERSION } from "../../../src/store/migrations.js";
 import { openSqliteStore } from "../../../src/store/sqlite.js";
 import type {
   NewStageRun,
@@ -57,6 +57,7 @@ const stageRun = (over: Partial<NewStageRun> = {}): NewStageRun => ({
   heldSince: null,
   runtime: null,
   waitReason: null,
+  wakeAt: null,
   ...over,
 });
 
@@ -262,18 +263,30 @@ describe("persistence", () => {
     raw.close();
   });
 
+  it("migrates a version 1 store, keeping its rows", () => {
+    const file = tmpFile();
+    const raw = new DatabaseSync(file);
+    raw.exec(MIGRATIONS[0] as string);
+    raw.exec("INSERT INTO meta (key, value) VALUES ('schema_version', '1')");
+    raw.close();
+    const store = open(file);
+    store.tx((t) => {
+      seed(t);
+      t.insertStageRun(stageRun({ wakeAt: 7 }));
+      expect(t.getStageRun("s1")?.wakeAt).toBe(7);
+    });
+  });
+
   it("schema_version mismatch refuses to open", () => {
     const file = tmpFile();
     open(file).close();
     const raw = new DatabaseSync(file);
-    raw.exec("UPDATE meta SET value='2' WHERE key='schema_version'");
+    const newer = SCHEMA_VERSION + 1;
+    raw.exec(`UPDATE meta SET value='${newer}' WHERE key='schema_version'`);
     raw.close();
-    expect(() => openSqliteStore(file)).toThrow(
-      "store schema 2 is newer than this engine (1)",
-    );
-    expect(() => openSqliteStore(file, { readonly: true })).toThrow(
-      "store schema 2 is newer than this engine (1)",
-    );
+    const message = `store schema ${newer} is newer than this engine (${SCHEMA_VERSION})`;
+    expect(() => openSqliteStore(file)).toThrow(message);
+    expect(() => openSqliteStore(file, { readonly: true })).toThrow(message);
   });
 
   it("read-only opens read but never write", () => {
@@ -337,6 +350,9 @@ describe("rows", () => {
         resolvedAt: null,
         prompt: "ok?",
         outcomes: ["approve", "reject"],
+        pollAt: null,
+        pollFailures: 0,
+        pollError: null,
       });
       t.upsertGate({
         stageRunId: "s1",
@@ -347,8 +363,14 @@ describe("rows", () => {
         resolvedAt: 8,
         prompt: "ok?",
         outcomes: ["approve", "reject"],
+        pollAt: 12,
+        pollFailures: 2,
+        pollError: "boom",
       });
       expect(t.getGate("s1")).toMatchObject({
+        pollAt: 12,
+        pollFailures: 2,
+        pollError: "boom",
         remindAt: 9,
         resolvedBy: "operator",
         outcomes: ["approve", "reject"],
@@ -660,6 +682,63 @@ describe("attempts, visits and turn keys", () => {
         t.insertStageRun(stageRun({ stageRunId: "s2" }));
       }),
     ).toThrow(/UNIQUE/);
+  });
+
+  it("keys the cancel action by run, once", () => {
+    const store = open();
+    store.tx((t) => {
+      seed(t);
+      t.insertStageRun(stageRun({ stage: "undo" }), { cancelAction: true });
+      expect(t.getStageRun("s1")?.idempotencyKey).toBe("r1:cancel");
+      expect(() =>
+        t.insertStageRun(stageRun({ stageRunId: "s2", attempt: 2 }), {
+          cancelAction: true,
+        }),
+      ).toThrow(/UNIQUE/);
+    });
+  });
+});
+
+describe("wake times", () => {
+  it("lists due stage runs by wake time and agent rows without one", () => {
+    const store = open();
+    store.tx((t) => {
+      seed(t);
+      t.insertStageRun(stageRun({ stageRunId: "a", stage: "a", createdAt: 1 }));
+      t.insertStageRun(
+        stageRun({ stageRunId: "late", stage: "w1", wakeAt: 50, createdAt: 2 }),
+      );
+      t.insertStageRun(
+        stageRun({ stageRunId: "soon", stage: "w2", wakeAt: 10, createdAt: 3 }),
+      );
+      t.insertStageRun(
+        stageRun({
+          stageRunId: "later",
+          stage: "w3",
+          wakeAt: 90,
+          createdAt: 4,
+        }),
+      );
+      const ids = (rows: StageRunRow[]) => rows.map((r) => r.stageRunId);
+      expect(ids(t.listStageRuns({ wakeBy: 50, limit: 10 }))).toEqual([
+        "soon",
+        "late",
+      ]);
+      expect(ids(t.listStageRuns({ wakes: false, limit: 10 }))).toEqual(["a"]);
+      expect(
+        t.updateStageRunIf(
+          "soon",
+          { state: "submitted", attempt: 1 },
+          {
+            wakeAt: null,
+          },
+        ),
+      ).toBe(true);
+      expect(ids(t.listStageRuns({ wakeBy: 100, limit: 10 }))).toEqual([
+        "late",
+        "later",
+      ]);
+    });
   });
 });
 

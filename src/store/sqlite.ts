@@ -10,6 +10,7 @@ import type {
   DefinitionRow,
   Ending,
   GateRow,
+  InsertStageRunOptions,
   LimitRow,
   NewStageRun,
   OpenOptions,
@@ -58,6 +59,7 @@ const STAGE_RUN_COLUMNS: Record<keyof StageRunPatch, string> = {
   heldSince: "held_since",
   runtime: "runtime_json",
   waitReason: "wait_reason",
+  wakeAt: "wake_at",
 };
 
 const JSON_PATCH_KEYS = new Set(["fields", "runtime"]);
@@ -124,6 +126,7 @@ function stageRunFromRow(r: Row): StageRunRow {
     heldSince: r.held_since as number | null,
     runtime: fromJson(r.runtime_json) as StageRunRow["runtime"],
     waitReason: r.wait_reason as string | null,
+    wakeAt: r.wake_at as number | null,
   };
 }
 
@@ -152,6 +155,9 @@ function gateFromRow(r: Row): GateRow {
     resolvedAt: r.resolved_at as number | null,
     prompt: r.prompt as string | null,
     outcomes: fromJson(r.outcomes_json) as string[] | null,
+    pollAt: r.poll_at as number | null,
+    pollFailures: r.poll_failures as number,
+    pollError: r.poll_error as string | null,
   };
 }
 
@@ -317,7 +323,7 @@ class SqliteTx implements StoreTx {
     return Number(result.changes) === 1;
   }
 
-  insertStageRun(row: NewStageRun): void {
+  insertStageRun(row: NewStageRun, opts: InsertStageRunOptions = {}): void {
     this.run(
       `INSERT INTO stage_runs
          (stage_run_id, run_id, stage, attempt, visit, retry_index, state,
@@ -325,8 +331,8 @@ class SqliteTx implements StoreTx {
           dispatch_seq,
           deadline_at, created_at, started_at, ended_at, outcome, ending,
           fields_json, progress_note, progress_at, progress_seq, dispatched_at,
-          held_since, runtime_json, wait_reason)
-       VALUES (${placeholders(27)})`,
+          held_since, runtime_json, wait_reason, wake_at)
+       VALUES (${placeholders(28)})`,
       row.stageRunId,
       row.runId,
       row.stage,
@@ -335,7 +341,9 @@ class SqliteTx implements StoreTx {
       row.retryIndex,
       row.state,
       row.tokenHash,
-      `${row.runId}:${row.stage}:${row.attempt}`,
+      opts.cancelAction
+        ? `${row.runId}:cancel`
+        : `${row.runId}:${row.stage}:${row.attempt}`,
       row.adapterRunId,
       row.sessionKey,
       row.turnsUsed,
@@ -354,6 +362,7 @@ class SqliteTx implements StoreTx {
       row.heldSince,
       toJson(row.runtime),
       row.waitReason,
+      row.wakeAt,
     );
   }
 
@@ -379,6 +388,8 @@ class SqliteTx implements StoreTx {
   listStageRuns(filter: {
     state?: StageRunState[];
     inFlight?: boolean;
+    wakes?: false;
+    wakeBy?: number;
     limit: number;
   }): StageRunRow[] {
     checkLimit(filter.limit);
@@ -390,10 +401,19 @@ class SqliteTx implements StoreTx {
     }
     if (filter.inFlight === true) where.push("dispatched_at IS NOT NULL");
     if (filter.inFlight === false) where.push("dispatched_at IS NULL");
+    if (filter.wakes === false) where.push("wake_at IS NULL");
+    if (filter.wakeBy !== undefined) {
+      where.push("wake_at IS NOT NULL AND wake_at <= ?");
+      params.push(filter.wakeBy);
+    }
     const clause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const order =
+      filter.wakeBy === undefined
+        ? "created_at ASC, rowid ASC"
+        : "wake_at ASC, created_at ASC, rowid ASC";
     return this.all(
       `SELECT * FROM stage_runs ${clause}
-       ORDER BY created_at ASC, rowid ASC LIMIT ?`,
+       ORDER BY ${order} LIMIT ?`,
       ...params,
       filter.limit,
     ).map(stageRunFromRow);
@@ -455,8 +475,8 @@ class SqliteTx implements StoreTx {
     this.run(
       `INSERT INTO gates
          (stage_run_id, kind, waiting_on, remind_at, resolved_by, resolved_at,
-          prompt, outcomes_json)
-       VALUES (${placeholders(8)})
+          prompt, outcomes_json, poll_at, poll_failures, poll_error)
+       VALUES (${placeholders(11)})
        ON CONFLICT (stage_run_id) DO UPDATE SET
          kind = excluded.kind,
          waiting_on = excluded.waiting_on,
@@ -464,7 +484,10 @@ class SqliteTx implements StoreTx {
          resolved_by = excluded.resolved_by,
          resolved_at = excluded.resolved_at,
          prompt = excluded.prompt,
-         outcomes_json = excluded.outcomes_json`,
+         outcomes_json = excluded.outcomes_json,
+         poll_at = excluded.poll_at,
+         poll_failures = excluded.poll_failures,
+         poll_error = excluded.poll_error`,
       row.stageRunId,
       row.kind,
       row.waitingOn,
@@ -473,6 +496,9 @@ class SqliteTx implements StoreTx {
       row.resolvedAt,
       row.prompt,
       toJson(row.outcomes),
+      row.pollAt,
+      row.pollFailures,
+      row.pollError,
     );
   }
 

@@ -168,6 +168,18 @@ describe("loadDefinition", () => {
     );
   });
 
+  test("a poll gate declares exactly one outcome", async () => {
+    const file = await rewrite((y) =>
+      y.replace(
+        "    who: operator\n",
+        "    poll: { fact: demo.ready, every: 5m }\n",
+      ),
+    );
+    expect((await loadDefinition(file)).problems).toContain(
+      "stage publish: a poll gate declares exactly one outcome",
+    );
+  });
+
   test("a missing brief is a problem", async () => {
     await rm(path.join(work, "briefs/check.md"));
     const loaded = await loadDefinition(path.join(work, "pipeline.yaml"));
@@ -374,6 +386,7 @@ describe("loadDefinition", () => {
           "    who: operator\n",
           "    poll: { fact: demo.ready, every: 5m }\n",
         )
+        .replace("      reject: { next: failed }\n", "")
         .replace(
           "  done: { type: end, status: completed }",
           "  hold: { type: wait, until: demo.later, next: done }\n  done: { type: end, status: completed }",

@@ -240,7 +240,7 @@ describe("dispatch", () => {
     );
   });
 
-  it("stages the engine does not run yet are left submitted", async () => {
+  it("the tick opens the operator gate after the agents", async () => {
     const { engine, adapter, store } = await make();
     const { runId } = await engine.startRun("review-loop", { topic: "rust" });
     await engine.tick();
@@ -256,11 +256,12 @@ describe("dispatch", () => {
     expect(stageRuns(store, runId)).toEqual([
       { stage: "draft", state: "completed", attempt: 1 },
       { stage: "check", state: "completed", attempt: 1 },
-      { stage: "publish", state: "submitted", attempt: 1 },
+      { stage: "publish", state: "input_required", attempt: 1 },
     ]);
+    expect(engine.status(runId).run.status).toBe("input_required");
   });
 
-  it("a stage run that cannot be dispatched does not hold up the others", async () => {
+  it("a stage run whose brief cannot be rendered is rejected, not retried", async () => {
     const base = await reviewLoop();
     const { engine, adapter, source } = await make();
     source.defs.set("review-loop", { ...base, hash: "nobrief", briefs: {} });
@@ -274,17 +275,29 @@ describe("dispatch", () => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       await engine.tick();
-      expect(logged).toHaveBeenCalledWith(
-        expect.stringMatching(/brief briefs\/draft.md is missing/),
-      );
+      await engine.tick();
+      expect(logged).not.toHaveBeenCalled();
     } finally {
       logged.mockRestore();
     }
     expect(adapter.calls.map((c) => c.idempotencyKey)).toEqual([
       `${fine}:draft:1`,
     ]);
-    const stuck = engine.status(broken).live;
-    expect([stuck?.state, stuck?.dispatchSeq]).toEqual(["submitted", 0]);
+    const view = engine.status(broken);
+    expect(view.live).toBeUndefined();
+    expect(view.run.status).toBe("failed");
+    const rejected = view.transitions.find((x) => x.event === "stage_rejected");
+    expect(rejected).toMatchObject({
+      fromState: "submitted",
+      toState: "rejected",
+    });
+    expect(rejected?.detail).toEqual({
+      reason: "brief briefs/draft.md is missing from the definition",
+    });
+    expect(view.transitions.at(-1)).toMatchObject({
+      event: "stage_rejected",
+      toState: "failed",
+    });
   });
 
   it("a failed capabilities read is asked again on the next tick", async () => {
