@@ -76,6 +76,7 @@ export function byToken(
   }
   const ended = !["submitted", "working", "completed"].includes(row.state);
   if (ended) {
+    const timedOut = row.ending === "timeout";
     t.appendTransition({
       runId: row.runId,
       stageRunId: row.stageRunId,
@@ -85,9 +86,13 @@ export function byToken(
       outcome: null,
       actor: `agent:${callerAgent ?? stage.agent}`,
       at: now,
-      detail: { reason: "attempt ended" },
+      detail: { reason: timedOut ? "attempt timed out" : "attempt ended" },
     });
-    return refused(`this attempt has ended (${row.state})`);
+    return refused(
+      timedOut
+        ? "this attempt timed out; its deadline passed"
+        : `this attempt has ended (${row.state})`,
+    );
   }
   if (callerAgent !== undefined && callerAgent !== stage.agent) {
     return refused(

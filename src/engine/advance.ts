@@ -134,7 +134,7 @@ export function guardContext(t: StoreTx, run: RunRow): GuardContext {
 
 /** Creates the stage's submitted stage run, or ends the run on an `end` stage. */
 export function enter(ctx: RunCtx, stageId: string, actor: string): void {
-  const { t, run, now } = ctx;
+  const { t, run } = ctx;
   const stage = ctx.pinned.def.stages[stageId];
   if (!stage) {
     failRun(ctx, "unknown_stage", actor, { stage: stageId });
@@ -144,14 +144,29 @@ export function enter(ctx: RunCtx, stageId: string, actor: string): void {
     endRun(ctx, stageId, stage.status, actor);
     return;
   }
+  submit(ctx, stageId, t.countVisits(run.runId, stageId) + 1, 0, actor);
+}
+
+/**
+ * Inserts the next attempt of `stageId` as a submitted stage run: a new
+ * visit with retry index 0, or a retry within `visit`.
+ */
+export function submit(
+  ctx: RunCtx,
+  stageId: string,
+  visit: number,
+  retryIndex: number,
+  actor: string,
+): void {
+  const { t, run, now } = ctx;
   const stageRunId = newStageRunId();
   t.insertStageRun({
     stageRunId,
     runId: run.runId,
     stage: stageId,
     attempt: t.maxAttempt(run.runId, stageId) + 1,
-    visit: t.countVisits(run.runId, stageId) + 1,
-    retryIndex: 0,
+    visit,
+    retryIndex,
     state: "submitted",
     tokenHash: null,
     adapterRunId: null,
@@ -165,6 +180,9 @@ export function enter(ctx: RunCtx, stageId: string, actor: string): void {
     outcome: null,
     fields: null,
     progressNote: null,
+    progressAt: null,
+    progressSeq: null,
+    dispatchedAt: null,
     runtime: null,
     waitReason: null,
   });

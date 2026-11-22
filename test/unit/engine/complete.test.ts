@@ -4,9 +4,7 @@ import {
   stageProgressTool,
 } from "../../../src/completion/tools.js";
 import { mintToken } from "../../../src/engine/tokens.js";
-import type { LoadedDefinition } from "../../../src/format/load.js";
-import type { Definition } from "../../../src/format/types.js";
-import { lastToken, type Rig, reviewLoop, rig } from "./engine-helpers.js";
+import { lastToken, type Rig, rig, variant } from "./engine-helpers.js";
 
 const rigs: Rig[] = [];
 async function make(): Promise<Rig> {
@@ -26,17 +24,6 @@ async function started(r: Rig): Promise<{ runId: string; token: string }> {
   const { runId } = await r.engine.startRun("review-loop", { topic: "rust" });
   await r.engine.tick();
   return { runId, token: lastToken(r.adapter) };
-}
-
-async function variant(
-  hash: string,
-  edit: (def: Definition, briefs: Record<string, string>) => void,
-): Promise<LoadedDefinition> {
-  const base = await reviewLoop();
-  const def = structuredClone(base.def);
-  const briefs = { ...base.briefs };
-  edit(def, briefs);
-  return { ...base, hash, def, briefs };
 }
 
 describe("stage_complete", () => {
@@ -125,6 +112,7 @@ describe("stage_complete", () => {
         dispatchSeq: 0,
         deadlineAt: null,
         startedAt: null,
+        dispatchedAt: null,
       });
     });
     await r.engine.tick();
@@ -156,7 +144,7 @@ describe("stage_complete", () => {
       t.updateStageRunIf(
         live.stageRunId,
         { state: "working", attempt: 1 },
-        { state: "failed", ending: "timeout" },
+        { state: "failed", ending: "turn_error" },
       );
     });
     const result = await r.engine.complete({
@@ -200,7 +188,7 @@ describe("stage_complete", () => {
       t.updateStageRunIf(
         live.stageRunId,
         { state: "working", attempt: 1 },
-        { state: "failed", ending: "timeout" },
+        { state: "failed", ending: "turn_error" },
       );
     });
     const result = await r.engine.complete({
@@ -522,7 +510,7 @@ describe("completion edge cases", () => {
       t.updateStageRunIf(
         live.stageRunId,
         { state: "working", attempt: 1 },
-        { state: "failed", ending: "timeout" },
+        { state: "failed", ending: "turn_error" },
       );
     });
     expect(await r.engine.progress({ token, note: "late" })).toMatchObject({

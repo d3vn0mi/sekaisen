@@ -57,12 +57,17 @@ export const MIGRATIONS: readonly string[] = [
     ending          TEXT,
     fields_json     TEXT,
     progress_note   TEXT,
+    progress_at     INTEGER,
+    progress_seq    INTEGER,
+    dispatched_at   INTEGER,
     runtime_json    TEXT,
     wait_reason     TEXT
   );
   CREATE INDEX stage_runs_state ON stage_runs (state);
   CREATE INDEX stage_runs_token_hash ON stage_runs (token_hash);
   CREATE INDEX stage_runs_run ON stage_runs (run_id, stage);
+  CREATE INDEX stage_runs_in_flight ON stage_runs (dispatched_at)
+    WHERE dispatched_at IS NOT NULL;
 
   CREATE TABLE transitions (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,

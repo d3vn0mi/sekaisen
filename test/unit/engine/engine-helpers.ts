@@ -10,6 +10,7 @@ import {
   type LoadedDefinition,
   loadDefinition,
 } from "../../../src/format/load.js";
+import type { Definition } from "../../../src/format/types.js";
 import { createRegistry } from "../../../src/host/registry.js";
 import { openSqliteStore } from "../../../src/store/sqlite.js";
 import type { Store } from "../../../src/store/types.js";
@@ -73,4 +74,16 @@ export function lastToken(adapter: FakeAdapter): string {
   const call = adapter.calls.at(-1);
   if (!call) throw new Error("no turn was started");
   return tokenOf(call.message);
+}
+
+/** The review-loop definition under another hash, edited by `edit`. */
+export async function variant(
+  hash: string,
+  edit: (def: Definition, briefs: Record<string, string>) => void,
+): Promise<LoadedDefinition> {
+  const base = await reviewLoop();
+  const def = structuredClone(base.def);
+  const briefs = { ...base.briefs };
+  edit(def, briefs);
+  return { ...base, hash, def, briefs };
 }

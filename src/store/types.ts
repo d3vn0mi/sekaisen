@@ -59,7 +59,10 @@ export interface StageRunRow {
   /** 0 for the first attempt of a visit, plus one per retry. */
   retryIndex: number;
   state: StageRunState;
-  /** SHA-256 of the completion token; null once the token is retired. */
+  /**
+   * SHA-256 of the completion token. It stays once the attempt ends, so a
+   * late call is recognised and refused rather than taken as unknown.
+   */
   tokenHash: string | null;
   /** `${runId}:${stage}:${attempt}`, derived by the store on insert and immutable. */
   idempotencyKey: string;
@@ -78,6 +81,15 @@ export interface StageRunRow {
   ending?: Ending;
   fields: unknown;
   progressNote: string | null;
+  /** When the last progress note was written. */
+  progressAt: number | null;
+  /** The dispatch sequence the last progress note was written under. */
+  progressSeq: number | null;
+  /**
+   * When the turn now in flight was recorded as started; null when no turn
+   * is in flight, or once the engine has read that turn's end.
+   */
+  dispatchedAt: number | null;
   runtime: RuntimeInfo | null;
   waitReason: string | null;
 }
@@ -166,9 +178,10 @@ export interface StoreTx {
   getStageRun(stageRunId: string): StageRunRow | undefined;
   /** The newest stage run of the run that is submitted, working or input_required. */
   liveStageRun(runId: string): StageRunRow | undefined;
-  /** Oldest first. */
+  /** Oldest first. `inFlight` keeps only stage runs with a turn in flight. */
   listStageRuns(filter: {
     state?: StageRunState[];
+    inFlight?: boolean;
     limit: number;
   }): StageRunRow[];
   /** False when the stage run no longer matches `expect`; the caller re-reads. */

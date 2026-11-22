@@ -22,6 +22,8 @@ export class FakeAdapter implements HarnessAdapter {
    * refuse the turn, or call back into the engine as a fast agent would.
    */
   beforeStart?: (p: StartTurn) => void | Promise<void>;
+  /** Runs inside `readRunOutcome` before it answers, like `beforeStart`. */
+  beforeRead?: (runId: string) => void | Promise<void>;
 
   private readonly outcomes = new Map<string, RunOutcome>();
   private readonly byKey = new Map<string, string>();
@@ -52,6 +54,7 @@ export class FakeAdapter implements HarnessAdapter {
   }
 
   async readRunOutcome(runId: string): Promise<RunOutcome> {
+    await this.beforeRead?.(runId);
     const set = this.outcomes.get(runId);
     if (set) return set;
     return this.runIds.has(runId) ? { state: "running" } : { state: "unknown" };

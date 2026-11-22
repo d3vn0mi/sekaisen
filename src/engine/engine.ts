@@ -1,5 +1,9 @@
 import { randomBytes } from "node:crypto";
-import type { Capabilities, HarnessAdapter } from "../adapter/types.js";
+import type {
+  Capabilities,
+  HarnessAdapter,
+  RunOutcome,
+} from "../adapter/types.js";
 import { validateJson } from "../format/jsonschema.js";
 import type { LoadedDefinition } from "../format/load.js";
 import type { AgentStage } from "../format/types.js";
@@ -17,6 +21,7 @@ import type {
 import { turnKey } from "../store/types.js";
 import { advance, ENGINE_ACTOR, enter, type RunCtx } from "./advance.js";
 import { outcomesList, renderBrief, renderContinuation } from "./brief.js";
+import { realTimers, type Timers, withTimeout } from "./calls.js";
 import { type Clock, systemClock } from "./clock.js";
 import {
   byToken,
@@ -37,8 +42,17 @@ import {
 import { newRunId } from "./ids.js";
 import { type Pinned, PinnedDefinitions } from "./pinned.js";
 import { deriveToken, hashToken, MIN_TOKEN_SECRET_BYTES } from "./tokens.js";
+import {
+  deadlinePassed,
+  forgetTurn,
+  holdForProvider,
+  recordTimeout,
+  recordTurnEnd,
+  type TickCtx,
+} from "./turns.js";
 import { descend, errorMessage, isPlainObject } from "./values.js";
 
+export type { Timers } from "./calls.js";
 export {
   type CompleteParams,
   type CompletionResult,
@@ -78,6 +92,14 @@ export interface EngineOptions {
    * started under the old token cannot complete.
    */
   tokenSecret?: Uint8Array;
+  /**
+   * Longest the engine waits on any one harness call, in milliseconds;
+   * 30000 by default. A call that takes longer is treated as one that
+   * failed, so a hung harness cannot stall the tick.
+   */
+  adapterCallTimeoutMs?: number;
+  /** The timers behind `adapterCallTimeoutMs`; real ones by default. */
+  timers?: Timers;
 }
 
 export interface RunStatusView {
@@ -92,6 +114,7 @@ export interface RunStatusView {
 export const COMPLETION_TOOLS = ["stage_complete", "stage_progress"];
 
 const DEFAULT_TICK_MS = 5000;
+const DEFAULT_CALL_TIMEOUT_MS = 30_000;
 const TICK_BATCH = 100;
 
 interface Prepared {
@@ -114,6 +137,8 @@ export class Engine {
   private readonly pinned = new PinnedDefinitions();
   private readonly events = new Emitter();
   private readonly tokenSecret: Uint8Array;
+  private readonly callTimeoutMs: number;
+  private readonly timers: Timers;
   private caps?: Promise<Capabilities>;
   private timer?: ReturnType<typeof setInterval>;
   private ticking?: Promise<void>;
@@ -124,6 +149,11 @@ export class Engine {
     this.clock = o.clock ?? systemClock;
     this.tickMs = o.tickMs ?? DEFAULT_TICK_MS;
     this.dispatching = o.dispatch !== false;
+    this.callTimeoutMs = o.adapterCallTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
+    this.timers = o.timers ?? realTimers;
+    if (!(Number.isFinite(this.callTimeoutMs) && this.callTimeoutMs > 0)) {
+      throw new Error("adapterCallTimeoutMs must be a positive number");
+    }
     if (
       o.tokenSecret !== undefined &&
       (!(o.tokenSecret instanceof Uint8Array) ||
@@ -319,7 +349,7 @@ export class Engine {
       const ok = t.updateStageRunIf(
         row.stageRunId,
         { state: row.state, attempt: row.attempt },
-        { progressNote: p.note },
+        { progressNote: p.note, progressAt: now, progressSeq: row.dispatchSeq },
       );
       if (!ok) return fail("the stage changed meanwhile; call again");
       t.appendTransition({
@@ -382,17 +412,122 @@ export class Engine {
 
   private async walk(): Promise<void> {
     if (!this.dispatching) return;
-    const rows = this.store.tx((t) =>
-      t.listStageRuns({ state: ["submitted"], limit: TICK_BATCH }),
+    let caps: Capabilities;
+    try {
+      caps = await this.capabilities();
+    } catch (err) {
+      this.report(err);
+      return;
+    }
+    // Turns first, so a continuation or retry they submit is dispatched in
+    // the same pass.
+    const inFlight = this.store.tx((t) =>
+      t.listStageRuns({ inFlight: true, limit: TICK_BATCH }),
     );
-    for (const row of rows) {
+    for (const row of inFlight) {
       try {
-        await this.dispatch(row.stageRunId);
+        await this.observe(row, caps);
       } catch (err) {
         // One broken stage run must not hold up the others.
         this.report(err);
       }
     }
+    const submitted = this.store.tx((t) =>
+      t.listStageRuns({ state: ["submitted"], limit: TICK_BATCH }),
+    );
+    for (const row of submitted) {
+      try {
+        await this.admit(row, caps);
+      } catch (err) {
+        this.report(err);
+      }
+    }
+  }
+
+  /** The harness's capabilities, read once; a failed read is asked again. */
+  private capabilities(): Promise<Capabilities> {
+    this.caps ??= this.call("capabilities", () =>
+      this.adapter.capabilities(),
+    ).catch((err) => {
+      this.caps = undefined;
+      throw err;
+    });
+    return this.caps;
+  }
+
+  /** A harness call bounded by `adapterCallTimeoutMs`. */
+  private call<T>(name: string, fn: () => Promise<T>): Promise<T> {
+    return withTimeout(name, fn, this.callTimeoutMs, this.timers);
+  }
+
+  /**
+   * One stage run with a turn in flight: an attempt past its deadline times
+   * out; otherwise the turn's end, once the harness reports it, is recorded.
+   */
+  private async observe(row: StageRunRow, caps: Capabilities): Promise<void> {
+    if (row.state === "working" && deadlinePassed(row, this.clock.now())) {
+      await this.timeOut(row, caps);
+      return;
+    }
+    const adapterRunId = row.adapterRunId;
+    if (
+      adapterRunId === null ||
+      !["working", "completed"].includes(row.state)
+    ) {
+      this.commit((t, emit) => forgetTurn(this.tickCtx(t, emit, caps), row));
+      return;
+    }
+    let outcome: RunOutcome;
+    try {
+      outcome = await this.call("readRunOutcome", () =>
+        this.adapter.readRunOutcome(adapterRunId),
+      );
+    } catch {
+      // Read again on the next tick.
+      return;
+    }
+    if (outcome.state === "running") return;
+    if (outcome.state === "unknown") {
+      // A working turn the harness no longer knows is for restart
+      // reconciliation; a completed one has nothing left to tell.
+      if (row.state === "completed") {
+        this.commit((t, emit) => forgetTurn(this.tickCtx(t, emit, caps), row));
+      }
+      return;
+    }
+    const ended = outcome;
+    this.commit((t, emit) =>
+      recordTurnEnd(this.tickCtx(t, emit, caps), row, ended),
+    );
+  }
+
+  private async timeOut(row: StageRunRow, caps: Capabilities): Promise<void> {
+    const abort = this.commit((t, emit) =>
+      recordTimeout(this.tickCtx(t, emit, caps), row),
+    );
+    if (abort !== undefined) await this.abort(abort, caps);
+  }
+
+  /** Asks the harness to stop a turn, where it can; a failure changes nothing. */
+  private async abort(adapterRunId: string, caps: Capabilities): Promise<void> {
+    const abortTurn = this.adapter.abortTurn?.bind(this.adapter);
+    if (!caps.canAbort || !abortTurn) return;
+    await this.call("abortTurn", () => abortTurn(adapterRunId)).catch(
+      () => false,
+    );
+  }
+
+  /** A submitted stage run: timed out, held for a provider, or dispatched. */
+  private async admit(row: StageRunRow, caps: Capabilities): Promise<void> {
+    if (deadlinePassed(row, this.clock.now())) {
+      await this.timeOut(row, caps);
+      return;
+    }
+    const held = this.commit((t, emit) =>
+      holdForProvider(this.tickCtx(t, emit, caps), row),
+    );
+    if (held !== undefined) return;
+    await this.dispatch(row.stageRunId, caps);
   }
 
   /**
@@ -400,27 +535,28 @@ export class Engine {
    * at any point is recoverable: record the dispatch (sequence and token hash),
    * call the harness outside any transaction, then record the turn.
    */
-  private async dispatch(stageRunId: string): Promise<void> {
-    this.caps ??= this.adapter.capabilities().catch((err) => {
-      // A failed read is not cached; the next dispatch asks again.
-      this.caps = undefined;
-      throw err;
-    });
-    const caps = await this.caps;
+  private async dispatch(
+    stageRunId: string,
+    caps: Capabilities,
+  ): Promise<void> {
     const prep = this.store.tx((t) => this.prepare(t, stageRunId, caps));
     if (!prep) return;
 
     let adapterRunId: string;
     try {
-      await this.adapter.openSession(prep.agent, prep.sessionKey);
-      ({ runId: adapterRunId } = await this.adapter.startTurn({
-        agent: prep.agent,
-        sessionKey: prep.sessionKey,
-        message: prep.message,
-        capMs: prep.capMs,
-        idempotencyKey: prep.idempotencyKey,
-        tools: [...COMPLETION_TOOLS],
-      }));
+      await this.call("openSession", () =>
+        this.adapter.openSession(prep.agent, prep.sessionKey),
+      );
+      ({ runId: adapterRunId } = await this.call("startTurn", () =>
+        this.adapter.startTurn({
+          agent: prep.agent,
+          sessionKey: prep.sessionKey,
+          message: prep.message,
+          capMs: prep.capMs,
+          idempotencyKey: prep.idempotencyKey,
+          tools: [...COMPLETION_TOOLS],
+        }),
+      ));
     } catch (err) {
       // The row keeps its dispatch sequence; the next tick resends the same
       // message under the same key.
@@ -445,9 +581,7 @@ export class Engine {
     const abort = this.commit((t, emit) =>
       this.recordTurn(t, prep, adapterRunId, emit),
     );
-    if (abort && this.adapter.abortTurn) {
-      await this.adapter.abortTurn(abort).catch(() => false);
-    }
+    if (abort) await this.abort(abort, caps);
   }
 
   /** Step one of a dispatch. Returns undefined when there is nothing to start. */
@@ -556,6 +690,8 @@ export class Engine {
           sessionKey: prep.sessionKey,
           turnsUsed: row.turnsUsed + 1,
           startedAt: row.startedAt ?? now,
+          dispatchedAt: now,
+          waitReason: null,
           deadlineAt:
             row.deadlineAt ?? (deadline === undefined ? null : now + deadline),
         },
@@ -594,6 +730,8 @@ export class Engine {
           sessionKey: prep.sessionKey,
           turnsUsed: row.turnsUsed + 1,
           startedAt: row.startedAt ?? now,
+          // Its turn's end is still read, for the provider it ran on.
+          dispatchedAt: now,
         },
       );
     }
@@ -649,6 +787,10 @@ export class Engine {
   }
 
   // --- plumbing -----------------------------------------------------------
+
+  private tickCtx(t: StoreTx, emit: EmitFn, caps: Capabilities): TickCtx {
+    return { t, pinned: this.pinned, now: this.clock.now(), emit, caps };
+  }
 
   private ctx(t: StoreTx, run: RunRow, emit: EmitFn): RunCtx {
     return {

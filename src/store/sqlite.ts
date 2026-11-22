@@ -52,6 +52,9 @@ const STAGE_RUN_COLUMNS: Record<keyof StageRunPatch, string> = {
   ending: "ending",
   fields: "fields_json",
   progressNote: "progress_note",
+  progressAt: "progress_at",
+  progressSeq: "progress_seq",
+  dispatchedAt: "dispatched_at",
   runtime: "runtime_json",
   waitReason: "wait_reason",
 };
@@ -114,6 +117,9 @@ function stageRunFromRow(r: Row): StageRunRow {
     ...(typeof r.ending === "string" ? { ending: r.ending as Ending } : {}),
     fields: fromJson(r.fields_json),
     progressNote: r.progress_note as string | null,
+    progressAt: r.progress_at as number | null,
+    progressSeq: r.progress_seq as number | null,
+    dispatchedAt: r.dispatched_at as number | null,
     runtime: fromJson(r.runtime_json) as StageRunRow["runtime"],
     waitReason: r.wait_reason as string | null,
   };
@@ -316,8 +322,9 @@ class SqliteTx implements StoreTx {
           token_hash, idempotency_key, adapter_run_id, session_key, turns_used,
           dispatch_seq,
           deadline_at, created_at, started_at, ended_at, outcome, ending,
-          fields_json, progress_note, runtime_json, wait_reason)
-       VALUES (${placeholders(23)})`,
+          fields_json, progress_note, progress_at, progress_seq, dispatched_at,
+          runtime_json, wait_reason)
+       VALUES (${placeholders(26)})`,
       row.stageRunId,
       row.runId,
       row.stage,
@@ -339,6 +346,9 @@ class SqliteTx implements StoreTx {
       row.ending ?? null,
       toJson(row.fields),
       row.progressNote,
+      row.progressAt,
+      row.progressSeq,
+      row.dispatchedAt,
       toJson(row.runtime),
       row.waitReason,
     );
@@ -365,15 +375,19 @@ class SqliteTx implements StoreTx {
 
   listStageRuns(filter: {
     state?: StageRunState[];
+    inFlight?: boolean;
     limit: number;
   }): StageRunRow[] {
     checkLimit(filter.limit);
+    const where: string[] = [];
     const params: Param[] = [];
-    let clause = "";
     if (filter.state) {
-      clause = `WHERE state IN (${placeholders(filter.state.length)})`;
+      where.push(`state IN (${placeholders(filter.state.length)})`);
       params.push(...filter.state);
     }
+    if (filter.inFlight === true) where.push("dispatched_at IS NOT NULL");
+    if (filter.inFlight === false) where.push("dispatched_at IS NULL");
+    const clause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
     return this.all(
       `SELECT * FROM stage_runs ${clause}
        ORDER BY created_at ASC, rowid ASC LIMIT ?`,

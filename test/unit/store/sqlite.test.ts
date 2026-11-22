@@ -51,6 +51,9 @@ const stageRun = (over: Partial<NewStageRun> = {}): NewStageRun => ({
   outcome: null,
   fields: null,
   progressNote: null,
+  progressAt: null,
+  progressSeq: null,
+  dispatchedAt: null,
   runtime: null,
   waitReason: null,
   ...over,
@@ -403,12 +406,38 @@ describe("rows", () => {
           runId: "b",
           createdAt: 10,
           state: "working",
+          dispatchedAt: 12,
+          progressAt: 11,
+          progressSeq: 1,
         }),
       );
+      expect(t.getStageRun("x1")).toMatchObject({
+        dispatchedAt: 12,
+        progressAt: 11,
+        progressSeq: 1,
+      });
       expect(t.listStageRuns({ limit: 5 }).map((s) => s.stageRunId)).toEqual([
         "x1",
         "x2",
       ]);
+      expect(
+        t.listStageRuns({ inFlight: true, limit: 5 }).map((s) => s.stageRunId),
+      ).toEqual(["x1"]);
+      expect(
+        t
+          .listStageRuns({ inFlight: false, state: ["working"], limit: 5 })
+          .map((s) => s.stageRunId),
+      ).toEqual([]);
+      expect(
+        t.updateStageRunIf(
+          "x1",
+          { state: "working", attempt: 1 },
+          {
+            dispatchedAt: null,
+          },
+        ),
+      ).toBe(true);
+      expect(t.listStageRuns({ inFlight: true, limit: 5 })).toEqual([]);
       expect(
         t
           .listStageRuns({ state: ["submitted"], limit: 5 })
