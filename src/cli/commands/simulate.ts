@@ -108,6 +108,7 @@ function line(l: TransitionLogLine): string {
 
 function report(r: SimulationResult): string {
   let out = r.log.map(line).join("");
+  for (const n of r.notes) out += `note: ${n}\n`;
   for (const p of r.problems) out += `problem: ${p}\n`;
   out += `status: ${r.status}${r.reachedEnd ? "" : " (did not reach an end)"}\n`;
   const total = r.coverage.taken.length + r.coverage.untaken.length;

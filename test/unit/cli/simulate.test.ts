@@ -1,13 +1,25 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test } from "vitest";
 import { main } from "../../../src/cli/main.js";
 
 const DIR = path.resolve("test/fixtures/defs/fix-loop");
 const FILE = path.join(DIR, "pipeline.yaml");
 const HAPPY = path.join(DIR, "scripts/happy.yaml");
 const STUCK = path.join(DIR, "scripts/stuck.yaml");
+
+const dirs: string[] = [];
+afterAll(() => {
+  for (const dir of dirs.splice(0))
+    rmSync(dir, { recursive: true, force: true });
+});
+
+function tempDir(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "sekaisen-sim-"));
+  dirs.push(dir);
+  return dir;
+}
 
 async function cli(...argv: string[]) {
   let out = "";
@@ -24,8 +36,7 @@ async function cli(...argv: string[]) {
 }
 
 function scriptFile(text: string): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "sekaisen-sim-"));
-  const file = path.join(dir, "script.yaml");
+  const file = path.join(tempDir(), "script.yaml");
   writeFileSync(file, text);
   return file;
 }
@@ -45,6 +56,21 @@ describe("sekaisen simulate", () => {
     ]);
   });
 
+  test("an entry the run moved past is printed as a note", async () => {
+    const r = await cli(
+      "simulate",
+      FILE,
+      "--script",
+      scriptFile(
+        "inputs: { topic: rust }\nstages:\n  check: [ { outcome: pass, after: 1h } ]",
+      ),
+    );
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(
+      "note: overtaken: check: outcome pass was due after the stage run had moved on\n",
+    );
+  });
+
   test("a failed end still exits 0", async () => {
     const r = await cli("simulate", FILE, "--script", STUCK);
     expect(r.code).toBe(0);
@@ -54,7 +80,7 @@ describe("sekaisen simulate", () => {
 
   test("a run that does not reach an end exits 1 and names the problem", async () => {
     // No deadline: a turn that never answers holds the run for ever.
-    const dir = mkdtempSync(path.join(tmpdir(), "sekaisen-sim-"));
+    const dir = tempDir();
     const file = path.join(dir, "pipeline.yaml");
     writeFileSync(
       file,

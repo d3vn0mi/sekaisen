@@ -96,7 +96,9 @@ export function advance(
   });
   if ("error" in chosen) {
     failRun(ctx, "guard_error", ENGINE_ACTOR, {
-      ...(chosen.branch === undefined ? {} : { branch: chosen.branch }),
+      ...(chosen.branchEdge === undefined
+        ? {}
+        : { branchEdge: chosen.branchEdge }),
       error: chosen.error,
     });
     return null;
@@ -111,17 +113,19 @@ export function choose(
   stage: string,
   outcome: string,
   next: Next,
-): { to: string; branch?: number } | { error: string; branch?: string } {
+): { to: string; branch?: number } | { error: string; branchEdge?: string } {
   if (typeof next === "string") return { to: next };
   const gc = guardContext(ctx.t, ctx.run);
   for (const [i, b] of next.entries()) {
     if (b.if === undefined) return { to: b.to, branch: i };
-    const branch = `${stage}.${outcome}[${i}]`;
     try {
       if (evalGuard(guard(ctx.pinned, b.if), gc))
         return { to: b.to, branch: i };
     } catch (err) {
-      return { error: errorMessage(err), branch };
+      return {
+        error: errorMessage(err),
+        branchEdge: `${stage}.${outcome}[${i}]`,
+      };
     }
   }
   return { error: `no branch of ${stage}.${outcome} matched` };

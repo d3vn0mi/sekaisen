@@ -1,7 +1,7 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test } from "vitest";
 import {
   type LoadedDefinition,
   loadDefinition,
@@ -13,7 +13,16 @@ import {
 } from "../../../src/simulate/simulate.js";
 
 const FIX_LOOP = path.resolve("test/fixtures/defs/fix-loop/pipeline.yaml");
+const REVIEW_LOOP = path.resolve(
+  "test/fixtures/defs/review-loop/pipeline.yaml",
+);
 const HOUR = 3_600_000;
+
+const dirs: string[] = [];
+afterAll(() => {
+  for (const dir of dirs.splice(0))
+    rmSync(dir, { recursive: true, force: true });
+});
 
 async function fixLoop(): Promise<LoadedDefinition> {
   const loaded = await loadDefinition(FIX_LOOP);
@@ -52,6 +61,7 @@ stages:
     expect(r.status).toBe("completed");
     expect(r.reachedEnd).toBe(true);
     expect(r.problems).toEqual([]);
+    expect(r.notes).toEqual([]);
     expect(r.elapsedMs).toBe(0);
     // biome-ignore format: one transition per line reads like the log
     expect(r.log).toEqual([
@@ -117,6 +127,41 @@ actions: { demo.publish: [ fail, ok ] }
     ]);
   });
 
+  test("a default visit sends the smallest fields its outcome accepts", async () => {
+    const loaded = await loadDefinition(REVIEW_LOOP);
+    expect(loaded.problems).toEqual([]);
+    // drafted requires pr_url; the default answers with it filled.
+    const r = await simulate(
+      loaded,
+      parseScript(
+        "inputs: { topic: rust }\nstages:\n  publish: [ { resolve: approve } ]",
+        loaded.def,
+      ),
+    );
+    expect(r.problems).toEqual([]);
+    expect(r.status).toBe("completed");
+    expect(r.coverage.taken).toEqual([
+      "draft.drafted",
+      "check.pass",
+      "publish.approve",
+    ]);
+  });
+
+  test("a default visit whose fields cannot be made minimal is an error naming the field", async () => {
+    const loaded = await fixLoop();
+    const def = structuredClone(loaded.def);
+    const draft = def.stages.draft;
+    if (draft?.type !== "agent") throw new Error("fixture changed");
+    (draft.outcomes.drafted as { fields?: unknown }).fields = {
+      type: "object",
+      properties: { url: { type: "string", pattern: "^https://" } },
+      required: ["url"],
+    };
+    await expect(
+      simulate({ ...loaded, def }, parseScript("inputs: { topic: rust }", def)),
+    ).rejects.toThrow(/field url: no minimal string matches pattern/);
+  });
+
   test("fix loop stops at the count() bound and goes to the gate", async () => {
     const r = await run(`
 inputs: { topic: rust }
@@ -180,6 +225,10 @@ stages:
     expect(r.status).toBe("failed");
     expect(events(r)).not.toContain("review:gate_resolved");
     expect(r.elapsedMs).toBe(24 * HOUR);
+    expect(r.problems).toEqual([]);
+    expect(r.notes).toEqual([
+      "overtaken: review: resolve approve was due after the stage run had moved on",
+    ]);
   });
 
   test("lost mid-stage retries", async () => {
@@ -260,6 +309,9 @@ stages:
     expect(r.status).toBe("failed");
     expect(events(r)).toContain("check:timeout");
     expect(r.problems).toEqual([]);
+    expect(r.notes).toEqual([
+      "overtaken: check: outcome pass was due after the stage run had moved on",
+    ]);
   });
 
   test("no_result and turn_error end the attempt as the engine classifies them", async () => {
@@ -315,6 +367,7 @@ actions:
 
   test("checks, waits and poll gates answer from the script", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "sekaisen-sim-"));
+    dirs.push(dir);
     const file = path.join(dir, "pipeline.yaml");
     writeFileSync(
       file,
@@ -390,19 +443,21 @@ stages:
 
   test("a completion the engine refuses is reported", async () => {
     const loaded = await fixLoop();
+    // Valid against the definition it was read with...
+    const script = parseScript(
+      "inputs: { topic: rust }\nstages:\n  draft: [ { outcome: drafted }, { outcome: drafted } ]",
+      loaded.def,
+    );
+    // ...but the definition simulated now requires a field it does not send.
     const def = structuredClone(loaded.def);
     const draft = def.stages.draft;
     if (draft?.type !== "agent") throw new Error("fixture changed");
-    // The default visit sends no fields; this outcome now requires one.
     (draft.outcomes.drafted as { fields?: unknown }).fields = {
       type: "object",
       properties: { summary: { type: "string" } },
       required: ["summary"],
     };
-    const r = await simulate(
-      { ...loaded, def },
-      parseScript("inputs: { topic: rust }", def),
-    );
+    const r = await simulate({ ...loaded, def }, script);
     expect(r.problems[0]).toMatch(/^completion_refused: draft: /);
     expect(r.status).toBe("failed");
   });

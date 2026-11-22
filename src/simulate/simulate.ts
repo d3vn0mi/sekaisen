@@ -1,6 +1,5 @@
 import { FakeAdapter } from "../adapter/fake.js";
 import type { StartTurn } from "../adapter/types.js";
-import { edgeId, edgesOf } from "../checks/edges.js";
 import { BRIEF_FOOTER } from "../engine/brief.js";
 import { VirtualClock } from "../engine/clock.js";
 import { Engine } from "../engine/engine.js";
@@ -14,22 +13,21 @@ import type {
   Store,
   TransitionRow,
 } from "../store/types.js";
-import { hostNames, type Script, type Visit } from "./script.js";
+import {
+  type Coverage,
+  coverage,
+  logLine,
+  type TransitionLogLine,
+} from "./coverage.js";
+import { minimalFields } from "./minimal.js";
+import {
+  hostNames,
+  type Script,
+  type SimEnding,
+  type Visit,
+} from "./script.js";
 
-/**
- * One transition of a simulated run, in the shape the conformance suite
- * compares: no times and no ids but `seq`. `run_stage` is the stage id, or
- * `run` for a transition of the run itself.
- */
-export interface TransitionLogLine {
-  seq: number;
-  run_stage: string;
-  from: string | null;
-  to: string;
-  event: string;
-  outcome?: string;
-  actor: string;
-}
+export type { TransitionLogLine } from "./coverage.js";
 
 export interface SimulationResult {
   status: RunStatus;
@@ -37,12 +35,18 @@ export interface SimulationResult {
   reachedEnd: boolean;
   log: TransitionLogLine[];
   /** Edge ids (`<stage>.<outcome>[<branch>]`) in definition order; `onCancel` is left out. */
-  coverage: { taken: string[]; untaken: string[] };
+  coverage: Coverage;
   /**
    * What kept the simulation from running as scripted: `stalled` (nothing
    * is due and the run has not ended), `max_steps`, `completion_refused`.
    */
   problems: string[];
+  /**
+   * Scripted entries that never took effect because the run moved past
+   * them first (a turn that timed out, a gate that timed out): worth
+   * knowing, not a problem.
+   */
+  notes: string[];
   /** Virtual time from the start of the run to the end of the simulation. */
   elapsedMs: number;
 }
@@ -105,6 +109,13 @@ class ScriptedAdapter extends FakeAdapter {
   }
 }
 
+/** A turn's visit the simulator plays: an outcome, or an ending other than a timeout. */
+type Played =
+  | Extract<Visit, { kind: "outcome" }>
+  | (Extract<Visit, { kind: "ending" }> & {
+      ending: Exclude<SimEnding, "timeout">;
+    });
+
 /** A scripted answer waiting for its time. */
 type Pending =
   | {
@@ -114,9 +125,15 @@ type Pending =
       stage: string;
       adapterRunId: string;
       token: string;
-      visit: Exclude<Visit, { kind: "resolve" }>;
+      visit: Played;
     }
-  | { kind: "gate"; dueAt: number; stageRunId: string; outcome: string };
+  | {
+      kind: "gate";
+      dueAt: number;
+      stageRunId: string;
+      stage: string;
+      outcome: string;
+    };
 
 class Simulation {
   private readonly def: Definition;
@@ -129,6 +146,7 @@ class Simulation {
   private turnsTaken = 0;
   private readonly gatesTaken = new Set<string>();
   private readonly problems: string[] = [];
+  private readonly notes: string[] = [];
 
   constructor(
     private readonly loaded: LoadedDefinition,
@@ -167,6 +185,7 @@ class Simulation {
       }
       this.clock.set(next);
     }
+    for (const p of this.pending) if (!this.stillWaiting(p)) this.drop(p);
     return this.result(runId);
   }
 
@@ -224,21 +243,17 @@ class Simulation {
     return list?.[i];
   }
 
-  /** The stage's next visit, or its default: the first outcome, at once. */
+  /**
+   * The stage's next visit, or its default: the first outcome, at once,
+   * with the smallest fields its schema accepts.
+   */
   private visitOf(stageId: string): Visit {
     const scripted = this.nextOf(
       `stage:${stageId}`,
       this.script.stages[stageId],
     );
     if (scripted) return scripted;
-    const stage = this.def.stages[stageId];
-    const first =
-      stage?.type === "agent" || stage?.type === "gate"
-        ? (Object.keys(stage.outcomes)[0] ?? "")
-        : "";
-    return stage?.type === "gate"
-      ? { kind: "resolve", outcome: first, after: 0 }
-      : { kind: "outcome", outcome: first, fields: {}, after: 0 };
+    return defaultVisit(this.def, stageId);
   }
 
   /** Gives each turn started and each operator gate opened since the last step its scripted answer. */
@@ -253,9 +268,8 @@ class Simulation {
       const row = live.find((r) => r.adapterRunId === turn.runId);
       if (!row) continue;
       const visit = this.visitOf(row.stage);
-      if (visit.kind === "resolve") continue;
       // A turn scripted to time out is left running until its deadline.
-      if (visit.kind === "ending" && visit.ending === "timeout") continue;
+      if (!isPlayed(visit)) continue;
       this.pending.push({
         kind: "turn",
         dueAt: now + visit.after,
@@ -282,6 +296,7 @@ class Simulation {
         kind: "gate",
         dueAt: now + visit.after,
         stageRunId: row.stageRunId,
+        stage: row.stage,
         outcome: visit.outcome,
       });
     }
@@ -289,8 +304,8 @@ class Simulation {
 
   /**
    * Plays every scripted answer that is due, earliest first. One the run
-   * has moved past (its turn timed out, its gate timed out) is dropped.
-   * True when any was played.
+   * has moved past (its turn timed out, its gate timed out) is dropped with
+   * a note. True when any was played.
    */
   private async resolveDue(): Promise<boolean> {
     const now = this.clock.now();
@@ -300,7 +315,10 @@ class Simulation {
     this.pending = this.pending.filter((p) => p.dueAt > now);
     let played = false;
     for (const p of due) {
-      if (!this.stillWaiting(p)) continue;
+      if (!this.stillWaiting(p)) {
+        this.drop(p);
+        continue;
+      }
       played = true;
       if (p.kind === "gate") {
         await this.engine.resolveGate(p.stageRunId, p.outcome, SIMULATOR_ACTOR);
@@ -356,9 +374,20 @@ class Simulation {
         this.engine = this.newEngine();
         await this.engine.reconcile();
         return;
-      case "timeout":
-        return;
     }
+  }
+
+  /** Notes a scripted answer the run moved past before it was due. */
+  private drop(p: Pending): void {
+    const what =
+      p.kind === "gate"
+        ? `resolve ${p.outcome}`
+        : p.visit.kind === "outcome"
+          ? `outcome ${p.visit.outcome}`
+          : `ending ${p.visit.ending}`;
+    this.notes.push(
+      `overtaken: ${p.stage}: ${what} was due after the stage run had moved on`,
+    );
   }
 
   /** True while the stage run a scripted answer is for still waits for it. */
@@ -373,7 +402,11 @@ class Simulation {
   /** The next moment after now when anything is due, if any. */
   private nextWake(): number | undefined {
     const now = this.clock.now();
-    this.pending = this.pending.filter((p) => this.stillWaiting(p));
+    this.pending = this.pending.filter((p) => {
+      if (this.stillWaiting(p)) return true;
+      this.drop(p);
+      return false;
+    });
     const times = this.pending.map((p) => p.dueAt);
     this.store.tx((t) => {
       for (const row of t.listStageRuns({ state: [...LIVE], limit: 1000 })) {
@@ -420,10 +453,37 @@ class Simulation {
         log,
         coverage: coverage(this.def, rows, stageOf),
         problems: [...this.problems],
+        notes: [...this.notes],
         elapsedMs: this.clock.now() - START,
       };
     });
   }
+}
+
+/** A stage's default visit: its first outcome, at once, with minimal fields. */
+function defaultVisit(def: Definition, stageId: string): Visit {
+  const stage = def.stages[stageId];
+  if (stage?.type === "gate") {
+    const first = Object.keys(stage.outcomes)[0] ?? "";
+    return { kind: "resolve", outcome: first, after: 0 };
+  }
+  const [first = "", outcome] =
+    stage?.type === "agent" ? (Object.entries(stage.outcomes)[0] ?? []) : [];
+  return {
+    kind: "outcome",
+    outcome: first,
+    fields: outcome?.fields
+      ? (minimalFields(outcome.fields) as Record<string, unknown>)
+      : {},
+    after: 0,
+  };
+}
+
+function isPlayed(visit: Visit): visit is Played {
+  return (
+    visit.kind === "outcome" ||
+    (visit.kind === "ending" && visit.ending !== "timeout")
+  );
 }
 
 /** The completion token in a turn's message, read from the brief footer's token line. */
@@ -448,70 +508,4 @@ function wakeTimes(row: StageRunRow): number[] {
   }
   if (row.abortNextAt !== null) times.push(row.abortNextAt);
   return times;
-}
-
-function logLine(
-  seq: number,
-  row: TransitionRow,
-  stage: string | undefined,
-): TransitionLogLine {
-  return {
-    seq,
-    run_stage: stage ?? "run",
-    from: row.fromState,
-    to: row.toState,
-    event: row.event,
-    ...(row.outcome === null ? {} : { outcome: row.outcome }),
-    actor: row.actor,
-  };
-}
-
-/** The declared edge a transition followed, if it followed one. */
-function edgeOf(row: TransitionRow, stage: string): string | undefined {
-  const detail = (row.detail ?? {}) as {
-    branch?: unknown;
-    exhausted?: unknown;
-  };
-  let label: string | undefined;
-  switch (row.event) {
-    case "stage_completed":
-      // An action completes with no outcome; its one edge is `next`.
-      label = row.outcome ?? "next";
-      break;
-    case "gate_resolved":
-    case "gate_passed":
-      label = row.outcome ?? undefined;
-      break;
-    case "wait_elapsed":
-      label = "next";
-      break;
-    case "gate_timeout":
-      label = "on_timeout";
-      break;
-    default:
-      if (detail.exhausted === true) label = "on_exhausted";
-  }
-  if (label === undefined) return undefined;
-  const branch = typeof detail.branch === "number" ? `[${detail.branch}]` : "";
-  return `${stage}.${label}${branch}`;
-}
-
-function coverage(
-  def: Definition,
-  rows: TransitionRow[],
-  stageOf: (row: TransitionRow) => string | undefined,
-): { taken: string[]; untaken: string[] } {
-  const seen = new Set<string>();
-  for (const row of rows) {
-    const stage = stageOf(row);
-    const id = stage === undefined ? undefined : edgeOf(row, stage);
-    if (id !== undefined) seen.add(id);
-  }
-  const ids = edgesOf(def)
-    .filter((e) => e.from !== "*")
-    .map(edgeId);
-  return {
-    taken: ids.filter((id) => seen.has(id)),
-    untaken: ids.filter((id) => !seen.has(id)),
-  };
 }

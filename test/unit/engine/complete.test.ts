@@ -339,6 +339,35 @@ describe("stage_complete", () => {
     expect(r.engine.status(runId).live?.stage).toBe("publish");
   });
 
+  it("the completion records which branch it took: the guarded one, then the fallback", async () => {
+    const r = await make();
+    const { runId } = await r.engine.startRun("review-loop", { topic: "t" });
+    for (let i = 0; i < 6; i++) {
+      await r.engine.tick();
+      const draft = i % 2 === 0;
+      await r.engine.complete({
+        token: lastToken(r.adapter),
+        outcome: draft ? "drafted" : "fail",
+        fields: draft ? { pr_url: "u" } : { findings: "f" },
+      });
+    }
+    const checks = r.store
+      .tx((t) => t.transitions(runId))
+      .filter(
+        (row) => row.event === "stage_completed" && row.outcome === "fail",
+      );
+    expect(checks.map((row) => row.detail)).toEqual([
+      { next: "draft", branch: 0 },
+      { next: "draft", branch: 0 },
+      { next: "failed", branch: 1 },
+    ]);
+    // A plain next records no branch.
+    const drafted = r.store
+      .tx((t) => t.transitions(runId))
+      .find((row) => row.outcome === "drafted");
+    expect(drafted?.detail).toEqual({ next: "check" });
+  });
+
   it("a guard counts the completion being applied", async () => {
     const r = await make();
     const { runId } = await r.engine.startRun("review-loop", { topic: "t" });
@@ -408,7 +437,7 @@ describe("stage_complete", () => {
     expect(last?.event).toBe("guard_error");
     expect(last?.toState).toBe("failed");
     expect(last?.detail).toMatchObject({
-      branch: "check.fail[0]",
+      branchEdge: "check.fail[0]",
       error: expect.stringMatching(/needs two numbers/),
     });
   });
