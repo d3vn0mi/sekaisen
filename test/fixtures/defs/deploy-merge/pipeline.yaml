@@ -1,0 +1,47 @@
+format: 1
+id: deploy-merge
+title: Two ways into one stage, one of them through a deploy
+version: 1
+defaults:
+  deadline: 30m
+start: c
+stages:
+  c:
+    type: check
+    check: demo.ready
+    outcomes:
+      go: rel
+      alt: x
+  rel:
+    type: agent
+    agent: publisher
+    session: run
+    brief: briefs/step.md
+    deploys: true
+    outcomes:
+      shipped: { next: m }
+  x:
+    type: agent
+    agent: drafter
+    session: run
+    brief: briefs/step.md
+    outcomes:
+      ok: { next: m }
+  m:
+    type: agent
+    agent: checker
+    session: run
+    brief: briefs/step.md
+    outcomes:
+      ok: { next: done }
+      bad: { next: rel2 }
+  rel2:
+    type: agent
+    agent: publisher
+    session: run
+    brief: briefs/step.md
+    deploys: true
+    outcomes:
+      shipped: { next: done }
+  done: { type: end, status: completed }
+  failed: { type: end, status: failed }

@@ -73,4 +73,46 @@ describe("minimalFields", () => {
       minimalFields({ type: "integer", minimum: 5, maximum: 4 }),
     ).toThrow(/no minimal value satisfies the schema: : must be >= 5/);
   });
+
+  test("sibling keywords hold inside the anyOf branch tried", () => {
+    expect(
+      minimalFields({
+        type: "object",
+        properties: { a: { type: "integer" } },
+        required: ["a"],
+        anyOf: [{ required: ["a"] }, { required: ["b"] }],
+      }),
+    ).toEqual({ a: 0 });
+  });
+
+  test("branches are tried in order until one gives a valid value", () => {
+    expect(
+      minimalFields({
+        type: "string",
+        oneOf: [{ pattern: "^y$" }, { minLength: 2 }],
+      }),
+    ).toBe("xx");
+    expect(minimalFields({ enum: ["a", "bb"], minLength: 2 })).toBe("bb");
+  });
+
+  test("sibling keywords hold beside a $ref", () => {
+    expect(
+      minimalFields({
+        type: "object",
+        properties: { s: { $ref: "#/$defs/text", minLength: 3 } },
+        required: ["s"],
+        $defs: { text: { type: "string" } },
+      }),
+    ).toEqual({ s: "xxx" });
+  });
+
+  test("a required name without a property takes additionalProperties' schema", () => {
+    expect(
+      minimalFields({
+        type: "object",
+        required: ["n"],
+        additionalProperties: { type: "integer", minimum: 4 },
+      }),
+    ).toEqual({ n: 4 });
+  });
 });

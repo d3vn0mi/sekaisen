@@ -171,6 +171,7 @@ describe("sekaisen simulate", () => {
       ["--max-depth", "x"],
       ["--max-paths", "0"],
       ["--max-paths", "1.5"],
+      ["--max-steps", "0"],
     ]) {
       expect((await cli("simulate", FILE, "--explore", ...bad)).code).toBe(2);
     }
@@ -191,8 +192,17 @@ describe("sekaisen simulate", () => {
     );
     expect(r.code).toBe(1);
     expect(r.lines[0]).toMatch(/^explore: \d+ paths, [1-9]\d* problems$/);
-    expect(r.lines).toContain("problem: step_limit: a:ok → b:bad → a:ok");
+    // Grouped by kind and stage, with the shortest path of each group.
+    expect(r.lines).toContain(
+      "problem: step_limit at b (4 paths): a:ok → b:bad → a:ok",
+    );
     expect(r.lines.at(-1)).toBe("edges: 3/3");
+  });
+
+  test("--explore --max-steps bounds each path", async () => {
+    const r = await cli("simulate", FILE, "--explore", "--max-steps", "1");
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/^problem: step_limit at /m);
   });
 
   test("--explore cut short by --max-paths warns and still exits 0", async () => {
@@ -229,7 +239,7 @@ describe("sekaisen simulate", () => {
     const r = await cli("simulate", "--help");
     expect(r.code).toBe(0);
     expect(r.out).toContain(
-      "sekaisen simulate <file> (--script <yaml> | --explore [--max-depth N] [--max-paths N]) [--json]",
+      "sekaisen simulate <file> (--script <yaml> | --explore [--max-depth N] [--max-paths N] [--max-steps N]) [--json]",
     );
     expect((await cli("--help")).out).toContain("simulate <file> --script");
   });

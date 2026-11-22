@@ -16,8 +16,9 @@ commands:
   check <file...> [--json]   verify pipeline definitions
   render <file> [--current <stage>]   print a Mermaid diagram
   simulate <file> --script <yaml> [--json]   run a scripted simulation
-  simulate <file> --explore [--max-depth N] [--max-paths N] [--json]
+  simulate <file> --explore [--max-depth N] [--max-paths N] [--max-steps N] [--json]
                              explore every path up to a bound
+                             (each path at most --max-steps ticks, 200 by default)
 
   --help                     show this text
 `;

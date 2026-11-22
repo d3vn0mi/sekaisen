@@ -1,7 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { type LoadedDefinition, loadDefinition } from "../../format/load.js";
-import { type ExploreResult, explore } from "../../simulate/explore.js";
+import {
+  EXPLORE_MAX_STEPS,
+  type ExploreProblem,
+  type ExploreResult,
+  explore,
+} from "../../simulate/explore.js";
 import {
   parseScript,
   type Script,
@@ -15,7 +20,7 @@ import {
 import type { Io } from "../main.js";
 
 export const SIMULATE_USAGE =
-  "sekaisen simulate <file> (--script <yaml> | --explore [--max-depth N] [--max-paths N]) [--json]";
+  "sekaisen simulate <file> (--script <yaml> | --explore [--max-depth N] [--max-paths N] [--max-steps N]) [--json]";
 
 const DEFAULT_MAX_DEPTH = 40;
 const DEFAULT_MAX_PATHS = 2000;
@@ -24,10 +29,12 @@ const DEFAULT_MAX_PATHS = 2000;
  * Runs a scripted simulation of one definition and prints its transition
  * log, final status and edge coverage; exit 0 when the run reached an `end`
  * stage, 1 when it did not. With `--explore`, simulates the definition's
- * paths instead and prints every problem with its path and the coverage
- * merged over all paths; exit 0 when there is no problem (a search cut
- * short by `--max-paths` only warns), 1 otherwise. Exit 1 when the file
- * or script cannot be used, 2 on a usage error.
+ * paths instead (each at most `--max-steps` ticks, 200 by default) and
+ * prints its problems, grouped by kind and stage with the shortest path
+ * of each, and the coverage merged over all paths; exit 0 when there is
+ * no problem (a search cut short by `--max-paths` only warns), 1
+ * otherwise. Exit 1 when the file or script cannot be used, 2 on a usage
+ * error.
  */
 export async function simulateCommand(args: string[], io: Io): Promise<number> {
   let parsed: ReturnType<
@@ -37,6 +44,7 @@ export async function simulateCommand(args: string[], io: Io): Promise<number> {
         explore: { type: "boolean" };
         "max-depth": { type: "string" };
         "max-paths": { type: "string" };
+        "max-steps": { type: "string" };
         json: { type: "boolean" };
         help: { type: "boolean" };
       };
@@ -51,6 +59,7 @@ export async function simulateCommand(args: string[], io: Io): Promise<number> {
         explore: { type: "boolean" },
         "max-depth": { type: "string" },
         "max-paths": { type: "string" },
+        "max-steps": { type: "string" },
         json: { type: "boolean" },
         help: { type: "boolean" },
       },
@@ -68,21 +77,30 @@ export async function simulateCommand(args: string[], io: Io): Promise<number> {
   const { script: scriptFile, explore: exploring } = parsed.values;
   const maxDepth = count(parsed.values["max-depth"], DEFAULT_MAX_DEPTH, true);
   const maxPaths = count(parsed.values["max-paths"], DEFAULT_MAX_PATHS, false);
+  const maxSteps = count(parsed.values["max-steps"], EXPLORE_MAX_STEPS, false);
   const limitsGiven =
     parsed.values["max-depth"] !== undefined ||
-    parsed.values["max-paths"] !== undefined;
-  if (maxDepth === undefined || maxPaths === undefined) {
+    parsed.values["max-paths"] !== undefined ||
+    parsed.values["max-steps"] !== undefined;
+  if (
+    maxDepth === undefined ||
+    maxPaths === undefined ||
+    maxSteps === undefined
+  ) {
     io.err(
-      `--max-depth takes a whole number, --max-paths a positive one\nusage: ${SIMULATE_USAGE}\n`,
+      `--max-depth takes a whole number, --max-paths and --max-steps positive ones\nusage: ${SIMULATE_USAGE}\n`,
     );
     return 2;
   }
-  if (
-    file === undefined ||
-    extra.length > 0 ||
-    (scriptFile === undefined) === (exploring !== true) ||
-    (limitsGiven && exploring !== true)
-  ) {
+  // Either a script, or exploring with its limits; never both.
+  const mode: { explore: true } | { script: string } | undefined = exploring
+    ? scriptFile === undefined
+      ? { explore: true }
+      : undefined
+    : scriptFile === undefined || limitsGiven
+      ? undefined
+      : { script: scriptFile };
+  if (file === undefined || extra.length > 0 || mode === undefined) {
     io.err(`usage: ${SIMULATE_USAGE}\n`);
     return 2;
   }
@@ -98,10 +116,10 @@ export async function simulateCommand(args: string[], io: Io): Promise<number> {
     for (const p of loaded.problems) io.err(`${file}: error load ${p}\n`);
     return 1;
   }
-  if (exploring) {
+  if ("explore" in mode) {
     let result: ExploreResult;
     try {
-      result = await explore(loaded, { maxDepth, maxPaths });
+      result = await explore(loaded, { maxDepth, maxPaths, maxSteps });
     } catch (x) {
       io.err(`${file}: error explore ${(x as Error).message}\n`);
       return 1;
@@ -113,12 +131,12 @@ export async function simulateCommand(args: string[], io: Io): Promise<number> {
     );
     return result.problems.length > 0 ? 1 : 0;
   }
-  if (scriptFile === undefined) return 2;
+  const scriptPath = mode.script;
   let text: string;
   try {
-    text = await readFile(scriptFile, "utf8");
+    text = await readFile(scriptPath, "utf8");
   } catch (x) {
-    io.err(`${scriptFile}: error load ${(x as Error).message}\n`);
+    io.err(`${scriptPath}: error load ${(x as Error).message}\n`);
     return 1;
   }
   let script: Script;
@@ -127,7 +145,7 @@ export async function simulateCommand(args: string[], io: Io): Promise<number> {
   } catch (x) {
     const problems =
       x instanceof ScriptError ? x.problems : [(x as Error).message];
-    for (const p of problems) io.err(`${scriptFile}: error script ${p}\n`);
+    for (const p of problems) io.err(`${scriptPath}: error script ${p}\n`);
     return 1;
   }
 
@@ -174,8 +192,21 @@ function report(r: SimulationResult): string {
 function exploreReport(r: ExploreResult): string {
   let out = `explore: ${r.paths} paths, ${r.problems.length} problems\n`;
   if (r.truncated) out += `explore: truncated at ${r.paths} paths\n`;
+  // One line per kind and stage, with the shortest path that shows it.
+  const groups = new Map<string, { shortest: ExploreProblem; paths: number }>();
   for (const p of r.problems) {
-    out += `problem: ${p.problem}: ${p.path.join(" → ") || "(no decisions)"}\n`;
+    const key = `${p.problem} at ${p.stage}`;
+    const g = groups.get(key);
+    if (g === undefined) groups.set(key, { shortest: p, paths: 1 });
+    else {
+      g.paths++;
+      if (p.path.length < g.shortest.path.length) g.shortest = p;
+    }
+  }
+  for (const [key, g] of groups) {
+    const way = g.shortest.path.join(" → ") || "(no decisions)";
+    const n = g.paths === 1 ? "1 path" : `${g.paths} paths`;
+    out += `problem: ${key} (${n}): ${way}\n`;
   }
   out += coverageLines(r.coverage);
   return out;

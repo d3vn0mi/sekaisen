@@ -7,10 +7,11 @@ const REF_PREFIX = "#/$defs/";
  * The smallest plain value `schema` accepts: a string is `"x"` (repeated up
  * to `minLength`), a number the larger of 0 and `minimum`, a boolean false,
  * an array `minItems` minimal items, an object every required property
- * filled the same way; `const` and the first `enum` value win over all of
- * these, and `anyOf` or `oneOf` take their first branch. Throws, naming the
- * field, when the value it builds does not satisfy the schema (a `pattern`
- * that `"x"` does not match, say).
+ * filled the same way (from `additionalProperties` when `properties` does
+ * not name it). `const` wins; `enum` values, then `anyOf` and `oneOf`
+ * branches (each with the keywords beside it), are tried in order until
+ * one gives a value the whole schema accepts. Throws, naming the field,
+ * when none does (a `pattern` that `"x"` does not match, say).
  */
 export function minimalFields(schema: JsonSchema): unknown {
   const value = build(schema, schema, "", 0);
@@ -34,13 +35,48 @@ function build(
   }
   const deeper = (sub: JsonSchema, at = path) =>
     build(sub, root, at, depth + 1);
-  if (s.$ref !== undefined) return deeper(resolve(s.$ref, root, path));
+  if (s.$ref !== undefined) {
+    const { $ref, ...beside } = s;
+    return deeper(merge(resolve($ref, root, path), beside));
+  }
   if ("const" in s) return s.const;
-  if (s.enum !== undefined && s.enum.length > 0) return s.enum[0];
-  const branch = s.anyOf?.[0] ?? s.oneOf?.[0];
-  if (branch !== undefined) return deeper(branch);
 
-  switch (typeOf(s)) {
+  const alternatives = alternativesOf(s);
+  if (alternatives.length === 0) return scalarOrObject(s, path, deeper);
+  // The first alternative whose value the whole schema accepts.
+  let first: { value?: unknown; error?: unknown } | undefined;
+  for (const make of alternatives) {
+    let value: unknown;
+    try {
+      value = make(deeper);
+    } catch (error) {
+      first ??= { error };
+      continue;
+    }
+    if (accepts(s, root, value)) return value;
+    first ??= { value };
+  }
+  if (first && "error" in first) throw first.error;
+  return first?.value;
+}
+
+type Deeper = (sub: JsonSchema, at?: string) => unknown;
+
+/** The enum values, then the anyOf and oneOf branches, as ways to build a value. */
+function alternativesOf(s: JsonSchema): Array<(deeper: Deeper) => unknown> {
+  const out: Array<(deeper: Deeper) => unknown> = [];
+  for (const v of s.enum ?? []) out.push(() => v);
+  if (out.length > 0) return out;
+  const { anyOf, oneOf, ...beside } = s;
+  for (const branch of [...(anyOf ?? []), ...(oneOf ?? [])]) {
+    out.push((deeper) => deeper(merge(beside, branch)));
+  }
+  return out;
+}
+
+function scalarOrObject(s: JsonSchema, path: string, deeper: Deeper): unknown {
+  const type = typeOf(s);
+  switch (type) {
     case "string": {
       let text = "x".repeat(Math.max(1, s.minLength ?? 1));
       if (s.maxLength !== undefined && text.length > s.maxLength) {
@@ -55,11 +91,10 @@ function build(
     }
     case "integer":
     case "number": {
-      const integer = typeOf(s) === "integer";
       let n = Math.max(0, s.minimum ?? 0);
-      if (integer) n = Math.ceil(n);
+      if (type === "integer") n = Math.ceil(n);
       if (s.maximum !== undefined && n > s.maximum) {
-        n = integer ? Math.floor(s.maximum) : s.maximum;
+        n = type === "integer" ? Math.floor(s.maximum) : s.maximum;
       }
       return n;
     }
@@ -72,13 +107,42 @@ function build(
         deeper(s.items ?? {}, `${path}/${i}`),
       );
     default: {
+      const extra =
+        typeof s.additionalProperties === "object"
+          ? s.additionalProperties
+          : {};
       const out: Record<string, unknown> = {};
       for (const name of s.required ?? []) {
-        out[name] = deeper(s.properties?.[name] ?? {}, `${path}/${name}`);
+        const sub =
+          s.properties && Object.hasOwn(s.properties, name)
+            ? s.properties[name]
+            : extra;
+        out[name] = deeper(sub ?? {}, `${path}/${name}`);
       }
       return out;
     }
   }
+}
+
+/**
+ * `b`'s keywords over `a`'s, keeping both sides' constraints where they
+ * add up: required names are joined, properties merged.
+ */
+function merge(a: JsonSchema, b: JsonSchema): JsonSchema {
+  const out: JsonSchema = { ...a, ...b };
+  if (a.required && b.required) {
+    out.required = [...new Set([...a.required, ...b.required])];
+  }
+  if (a.properties && b.properties) {
+    out.properties = { ...a.properties, ...b.properties };
+  }
+  return out;
+}
+
+/** True when `value` satisfies `s`, a part of `root` whose refs point into root. */
+function accepts(s: JsonSchema, root: JsonSchema, value: unknown): boolean {
+  const whole = root.$defs ? { ...s, $defs: root.$defs } : s;
+  return validateJson(whole, value).length === 0;
 }
 
 /** The schema's type, or the one its keywords imply; a string when nothing does. */

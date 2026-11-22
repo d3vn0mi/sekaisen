@@ -4,6 +4,7 @@ import { guardContext } from "../engine/advance.js";
 import { BRIEF_FOOTER } from "../engine/brief.js";
 import { VirtualClock } from "../engine/clock.js";
 import { Engine } from "../engine/engine.js";
+import type { JsonSchema } from "../format/jsonschema.js";
 import type { LoadedDefinition } from "../format/load.js";
 import type { Definition } from "../format/types.js";
 import type { GuardContext } from "../guard/eval.js";
@@ -612,11 +613,22 @@ function defaultVisit(def: Definition, stageId: string): Visit {
   return {
     kind: "outcome",
     outcome: first,
-    fields: outcome?.fields
-      ? (minimalFields(outcome.fields) as Record<string, unknown>)
-      : {},
+    fields: outcome?.fields ? minimalOf(stageId, first, outcome.fields) : {},
     after: 0,
   };
+}
+
+/** The smallest fields an outcome accepts; an error names the stage and outcome. */
+function minimalOf(
+  stage: string,
+  outcome: string,
+  schema: JsonSchema,
+): Record<string, unknown> {
+  try {
+    return minimalFields(schema) as Record<string, unknown>;
+  } catch (err) {
+    throw new Error(`${stage}:${outcome}: ${(err as Error).message}`);
+  }
 }
 
 function isPlayed(visit: Visit): visit is Played {

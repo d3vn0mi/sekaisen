@@ -1,3 +1,4 @@
+import type { JsonSchema } from "../format/jsonschema.js";
 import type { LoadedDefinition } from "../format/load.js";
 import type { Definition, Stage } from "../format/types.js";
 import { type GuardAst, parseGuard } from "../guard/parse.js";
@@ -16,14 +17,20 @@ export interface ExploreOptions {
   maxDepth: number;
   /** Most paths simulated before the search stops. */
   maxPaths: number;
+  /** Most ticks one path runs before it counts as a step limit; 200 by default. */
+  maxSteps?: number;
   /**
    * Skip what was already explored: a decision whose state was branched at
    * the same or a shallower depth, and the rest of a run whose defaults
    * bring it back to a state it was in. True by default; off only to show
    * that pruning loses nothing.
+   * @internal
    */
   prune?: boolean;
 }
+
+/** Ticks a path may take by default: a sound definition's paths need far fewer. */
+export const EXPLORE_MAX_STEPS = 200;
 
 /**
  * `no_end`: the run stopped short of an `end` stage (it stalled, or failed
@@ -38,6 +45,8 @@ export interface ExploreProblem {
   /** The choice made at each decision of the run, as `<stage>:<choice>`. */
   path: string[];
   problem: ExploreProblemKind;
+  /** For `policy` the deploying stage entered; otherwise where the run stopped. */
+  stage: string;
 }
 
 export interface ExploreResult {
@@ -94,13 +103,17 @@ export async function explore(
   const ctx: RunContext = {
     loaded,
     terms: guardTerms(def),
+    deploys: Object.entries(def.stages)
+      .filter(([, stage]) => stage.type === "agent" && stage.deploys === true)
+      .map(([id]) => id),
     prune,
+    maxSteps: opts.maxSteps ?? EXPLORE_MAX_STEPS,
     script: {
       stages: {},
       facts: {},
       checks: {},
       actions: {},
-      inputs: def.inputs ? minimalFields(def.inputs) : {},
+      inputs: def.inputs ? minimal("inputs", def.inputs) : {},
     },
     choices: new Map(),
   };
@@ -120,8 +133,8 @@ export async function explore(
     paths++;
     for (const id of run.result.coverage.taken) taken.add(id);
     const path = run.steps.map((s) => s.choices[s.chosen]?.label ?? "?");
-    for (const problem of problemsOf(def, run.result)) {
-      problems.push({ path, problem });
+    for (const { problem, stage } of problemsOf(def, run.result)) {
+      problems.push({ path, problem, stage });
     }
     // Branch at every decision this run took by default, shallowest first.
     const children: number[][] = [];
@@ -146,7 +159,10 @@ export async function explore(
 interface RunContext {
   loaded: LoadedDefinition;
   terms: Term[];
+  /** The stages that deploy. */
+  deploys: string[];
   prune: boolean;
+  maxSteps: number;
   script: Script;
   /** The choices of each stage and decision kind, built once. */
   choices: Map<string, Choice[]>;
@@ -157,13 +173,20 @@ async function runPath(ctx: RunContext, prefix: number[]): Promise<PathRun> {
   const steps: Step[] = [];
   const defaultStates = new Set<string>();
   let answered = false;
+  // Deploying stages entered before any operator answer.
+  const ungated = new Set<string>();
   const decide = (d: Decision): Answer | undefined => {
     const choices = choicesOf(ctx, d);
     const depth = steps.length;
     const chosen = depth < prefix.length ? (prefix[depth] as number) : 0;
     const choice = choices[chosen];
     if (choice === undefined) return undefined;
-    const state = stateOf(d, answered, ctx.terms);
+    if (!answered) {
+      for (const id of ctx.deploys) {
+        if (d.guard.attempts(id) > 0) ungated.add(id);
+      }
+    }
+    const state = stateOf(d, { answered, ungated }, ctx);
     steps.push({ choices, chosen, state });
     if (choice.operator) answered = true;
     if (ctx.prune && depth >= prefix.length) {
@@ -173,7 +196,10 @@ async function runPath(ctx: RunContext, prefix: number[]): Promise<PathRun> {
     }
     return choice.answer;
   };
-  const result = await simulate(ctx.loaded, ctx.script, { decide });
+  const result = await simulate(ctx.loaded, ctx.script, {
+    decide,
+    maxSteps: ctx.maxSteps,
+  });
   const refused = result.problems.find((p) =>
     p.startsWith("completion_refused"),
   );
@@ -183,23 +209,25 @@ async function runPath(ctx: RunContext, prefix: number[]): Promise<PathRun> {
   return { steps, result };
 }
 
-/** The problems one simulated path shows. */
+/** The problems one simulated path shows, each with its stage. */
 function problemsOf(
   def: Definition,
   r: SimulationResult,
-): ExploreProblemKind[] {
-  const out: ExploreProblemKind[] = [];
-  if (deployedUngated(def, r)) out.push("policy");
+): Array<{ problem: ExploreProblemKind; stage: string }> {
+  const out: Array<{ problem: ExploreProblemKind; stage: string }> =
+    deployedUngated(def, r).map((stage) => ({ problem: "policy", stage }));
+  const stage = r.log.findLast((l) => l.run_stage !== "run")?.run_stage ?? "";
   if (r.problems.some((p) => /^(max_steps|stopped):/.test(p))) {
-    out.push("step_limit");
+    out.push({ problem: "step_limit", stage });
   } else if (!r.reachedEnd) {
-    out.push("no_end");
+    out.push({ problem: "no_end", stage });
   }
   return out;
 }
 
-/** True when a deploying stage was entered before any operator answered a gate. */
-function deployedUngated(def: Definition, r: SimulationResult): boolean {
+/** Every deploying stage entered before any operator answered a gate, once each. */
+function deployedUngated(def: Definition, r: SimulationResult): string[] {
+  const found = new Set<string>();
   let answered = false;
   for (const line of r.log) {
     const stage = def.stages[line.run_stage];
@@ -216,19 +244,26 @@ function deployedUngated(def: Definition, r: SimulationResult): boolean {
       stage.deploys === true &&
       !answered
     ) {
-      return true;
+      found.add(line.run_stage);
     }
   }
-  return false;
+  return [...found];
 }
 
 /**
- * Everything that decides how the run goes on from a decision: where it
- * is, its retry and turn, whether an operator has answered, and the value
- * of every term a guard reads.
+ * Everything that decides how the run goes on from a decision, and what it
+ * will be reported for: where it is, its retry and turn, the value of every
+ * term a guard reads, whether an operator has answered, and which
+ * deploying stages it already entered without one. Two decisions with the
+ * same key must have the same future; the key has to name everything the
+ * engine chooses a route by, or pruning hides paths.
  */
-function stateOf(d: Decision, answered: boolean, terms: Term[]): string {
-  const values = terms.map((t) => {
+function stateOf(
+  d: Decision,
+  policy: { answered: boolean; ungated: Set<string> },
+  ctx: RunContext,
+): string {
+  const values = ctx.terms.map((t) => {
     const v =
       t.kind === "count"
         ? d.guard.count(t.stage, t.outcome)
@@ -242,8 +277,9 @@ function stateOf(d: Decision, answered: boolean, terms: Term[]): string {
     d.stage,
     d.retryIndex,
     d.turnsUsed,
-    answered,
     values,
+    policy.answered,
+    ctx.deploys.filter((id) => policy.ungated.has(id)),
   ]);
 }
 
@@ -332,7 +368,7 @@ function buildChoices(
             kind: "outcome",
             outcome: name,
             fields: o.fields
-              ? (minimalFields(o.fields) as Record<string, unknown>)
+              ? (minimal(`${id}:${name}`, o.fields) as Record<string, unknown>)
               : {},
             after: 0,
           }),
@@ -378,5 +414,14 @@ function buildChoices(
         choice("ok", { kind: "action", ok: true }),
         choice("~fail", { kind: "action", ok: false }),
       ];
+  }
+}
+
+/** The minimal value of a schema; an error names what it is for. */
+function minimal(what: string, schema: JsonSchema): unknown {
+  try {
+    return minimalFields(schema);
+  } catch (err) {
+    throw new Error(`${what}: ${(err as Error).message}`);
   }
 }
