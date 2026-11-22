@@ -27,6 +27,17 @@ function asObject(args: unknown): Record<string, unknown> | undefined {
 
 const error = (text: string): ToolResult => ({ text, isError: true });
 
+/** Runs an engine call; an exception becomes a tool error, never a thrown call. */
+async function guarded(fn: () => Promise<ToolResult>): Promise<ToolResult> {
+  try {
+    return await fn();
+  } catch (err) {
+    return error(
+      `the pipeline engine failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 export function stageCompleteTool(
   engine: Pick<Engine, "complete">,
 ): CompletionTool {
@@ -45,37 +56,39 @@ export function stageCompleteTool(
       required: ["token", "outcome"],
       additionalProperties: false,
     },
-    async handler(args, caller) {
-      const a = asObject(args);
-      if (!a) return error("arguments must be an object");
-      if (typeof a.token !== "string") return error("token must be a string");
-      if (typeof a.outcome !== "string") {
-        return error("outcome must be a string naming a declared outcome");
-      }
-      const artifacts = a.artifacts;
-      if (
-        artifacts !== undefined &&
-        (!Array.isArray(artifacts) ||
-          !artifacts.every((x) => typeof x === "string"))
-      ) {
-        return error("artifacts must be a list of strings");
-      }
-      const result = await engine.complete({
-        token: a.token,
-        outcome: a.outcome,
-        fields: a.fields,
-        ...(artifacts === undefined ? {} : { artifacts }),
-        ...(caller?.agent === undefined ? {} : { callerAgent: caller.agent }),
+    handler(args, caller) {
+      return guarded(async () => {
+        const a = asObject(args);
+        if (!a) return error("arguments must be an object");
+        if (typeof a.token !== "string") return error("token must be a string");
+        if (typeof a.outcome !== "string") {
+          return error("outcome must be a string naming a declared outcome");
+        }
+        const artifacts = a.artifacts;
+        if (
+          artifacts !== undefined &&
+          (!Array.isArray(artifacts) ||
+            !artifacts.every((x) => typeof x === "string"))
+        ) {
+          return error("artifacts must be a list of strings");
+        }
+        const result = await engine.complete({
+          token: a.token,
+          outcome: a.outcome,
+          fields: a.fields,
+          ...(artifacts === undefined ? {} : { artifacts }),
+          ...(caller?.agent === undefined ? {} : { callerAgent: caller.agent }),
+        });
+        if (!result.ok) return error(result.error);
+        const lead =
+          result.applied === "already"
+            ? `Already recorded: outcome ${a.outcome}.`
+            : `Recorded outcome ${a.outcome}.`;
+        return {
+          text: `${lead} Your part of this stage is done; you can end your turn.`,
+          isError: false,
+        };
       });
-      if (!result.ok) return error(result.error);
-      const lead =
-        result.applied === "already"
-          ? `Already recorded: outcome ${a.outcome}.`
-          : `Recorded outcome ${a.outcome}.`;
-      return {
-        text: `${lead} Your part of this stage is done; you can end your turn.`,
-        isError: false,
-      };
     },
   };
 }
@@ -96,21 +109,23 @@ export function stageProgressTool(
       required: ["token", "note"],
       additionalProperties: false,
     },
-    async handler(args, caller) {
-      const a = asObject(args);
-      if (!a) return error("arguments must be an object");
-      if (typeof a.token !== "string") return error("token must be a string");
-      if (typeof a.note !== "string") return error("note must be a string");
-      const result = await engine.progress({
-        token: a.token,
-        note: a.note,
-        ...(caller?.agent === undefined ? {} : { callerAgent: caller.agent }),
+    handler(args, caller) {
+      return guarded(async () => {
+        const a = asObject(args);
+        if (!a) return error("arguments must be an object");
+        if (typeof a.token !== "string") return error("token must be a string");
+        if (typeof a.note !== "string") return error("note must be a string");
+        const result = await engine.progress({
+          token: a.token,
+          note: a.note,
+          ...(caller?.agent === undefined ? {} : { callerAgent: caller.agent }),
+        });
+        if (!result.ok) return error(result.error);
+        return {
+          text: "Checkpoint saved. A later turn starts from this note.",
+          isError: false,
+        };
       });
-      if (!result.ok) return error(result.error);
-      return {
-        text: "Checkpoint saved. A later turn starts from this note.",
-        isError: false,
-      };
     },
   };
 }

@@ -58,6 +58,8 @@ export function byToken(
   now: number,
   token: string,
   callerAgent: string | undefined,
+  /** The event logged when the token's attempt has ended. */
+  refusedEvent: "completion_refused" | "progress_refused",
 ): TokenLookup {
   const refused = (error: string) => ({ kind: "refused" as const, error });
   const hash = hashToken(token);
@@ -79,7 +81,7 @@ export function byToken(
       stageRunId: row.stageRunId,
       fromState: row.state,
       toState: row.state,
-      event: "completion_refused",
+      event: refusedEvent,
       outcome: null,
       actor: `agent:${callerAgent ?? stage.agent}`,
       at: now,
@@ -135,7 +137,7 @@ export function checkFields(
     return `fields must be an object; outcome ${outcome} takes ${fieldsShorthand(schema)}`;
   }
   if (Buffer.byteLength(JSON.stringify(fields)) > MAX_FIELDS_BYTES) {
-    return "fields are larger than 64 KiB; put large content in an artifact and pass its location";
+    return `fields are larger than 64 KiB; put large content in an artifact and pass its location. Outcome ${outcome} takes ${fieldsShorthand(schema)}`;
   }
   if (!schema) {
     return Object.keys(fields).length === 0

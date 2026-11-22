@@ -512,7 +512,64 @@ describe("stage_progress", () => {
   });
 });
 
+describe("completion edge cases", () => {
+  it("progress with a token of an ended attempt logs progress_refused", async () => {
+    const r = await make();
+    const { runId, token } = await started(r);
+    r.store.tx((t) => {
+      const live = t.liveStageRun(runId);
+      if (!live) throw new Error("no live row");
+      t.updateStageRunIf(
+        live.stageRunId,
+        { state: "working", attempt: 1 },
+        { state: "failed", ending: "timeout" },
+      );
+    });
+    expect(await r.engine.progress({ token, note: "late" })).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/attempt has ended/),
+    });
+    expect(r.engine.status(runId).transitions.at(-1)?.event).toBe(
+      "progress_refused",
+    );
+  });
+
+  it("the 64 KiB fields error lists the declared fields", async () => {
+    const r = await make();
+    const { token } = await started(r);
+    const result = await r.engine.complete({
+      token,
+      outcome: "drafted",
+      fields: { pr_url: "x".repeat(64 * 1024) },
+    });
+    expect(result).toEqual({
+      ok: false,
+      error: expect.stringContaining("pr_url: string, summary: string?"),
+    });
+  });
+});
+
 describe("completion tools", () => {
+  it("turn an engine exception into a tool error", async () => {
+    const broken = {
+      complete: async () => {
+        throw new Error("store closed");
+      },
+      progress: async () => {
+        throw new Error("store closed");
+      },
+    };
+    const args = { token: "t", outcome: "o", note: "n" };
+    expect(await stageCompleteTool(broken).handler(args)).toEqual({
+      text: expect.stringMatching(/store closed/),
+      isError: true,
+    });
+    expect(await stageProgressTool(broken).handler(args)).toEqual({
+      text: expect.stringMatching(/store closed/),
+      isError: true,
+    });
+  });
+
   it("wrap complete and progress for any harness", async () => {
     const r = await make();
     const { token } = await started(r);

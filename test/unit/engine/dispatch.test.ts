@@ -2,7 +2,10 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderBrief } from "../../../src/engine/brief.js";
+import { Engine } from "../../../src/engine/engine.js";
+import { hashToken } from "../../../src/engine/tokens.js";
 import type { LoadedDefinition } from "../../../src/format/load.js";
+import { createRegistry } from "../../../src/host/registry.js";
 import type { Store } from "../../../src/store/types.js";
 import {
   lastToken,
@@ -370,5 +373,160 @@ describe("status and events", () => {
     sub.dispose();
     await engine.startRun("review-loop", { topic: "rust" });
     expect(seen).toHaveLength(4);
+  });
+});
+
+describe("per-attempt tokens", () => {
+  const secret = new Uint8Array(32).fill(3);
+
+  it("refuses a token secret shorter than 32 bytes", async () => {
+    const r = await make();
+    expect(
+      () =>
+        new Engine({
+          store: r.store,
+          adapter: r.adapter,
+          registry: createRegistry(),
+          definitions: r.source,
+          tokenSecret: new Uint8Array(31),
+        }),
+    ).toThrow(/32 bytes/);
+  });
+
+  it("a new engine with the same secret resends a byte-identical brief after a crash between steps", async () => {
+    const r = await make({ tokenSecret: secret });
+    const { runId } = await r.engine.startRun("review-loop", { topic: "rust" });
+    // Step 1 commits, then the process dies before the turn is recorded.
+    r.adapter.beforeStart = () => {
+      throw new Error("crash");
+    };
+    await r.engine.tick();
+    r.adapter.beforeStart = undefined;
+    const before = r.engine.status(runId).live;
+    expect([before?.state, before?.dispatchSeq, before?.adapterRunId]).toEqual([
+      "submitted",
+      1,
+      null,
+    ]);
+
+    const restarted = new Engine({
+      store: r.store,
+      adapter: r.adapter,
+      registry: createRegistry(),
+      clock: r.clock,
+      definitions: r.source,
+      tokenSecret: Uint8Array.from(secret),
+    });
+    await restarted.tick();
+    expect(r.adapter.calls).toHaveLength(2);
+    expect(r.adapter.calls[1]?.idempotencyKey).toBe(`${runId}:draft:1`);
+    expect(r.adapter.calls[1]?.message).toBe(r.adapter.calls[0]?.message);
+    const after = restarted.status(runId).live;
+    expect(after?.tokenHash).toBe(before?.tokenHash);
+    expect(
+      await restarted.complete({
+        token: tokenOf(r.adapter.calls[0]?.message ?? ""),
+        outcome: "blocked",
+        fields: { reason: "r" },
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
+  it("a new engine with another secret re-derives the token so the new turn can complete", async () => {
+    const r = await make({ tokenSecret: secret });
+    const { runId } = await r.engine.startRun("review-loop", { topic: "rust" });
+    r.adapter.beforeStart = () => {
+      throw new Error("crash");
+    };
+    await r.engine.tick();
+    r.adapter.beforeStart = undefined;
+    const restarted = new Engine({
+      store: r.store,
+      adapter: r.adapter,
+      registry: createRegistry(),
+      clock: r.clock,
+      definitions: r.source,
+    });
+    await restarted.tick();
+    const token = tokenOf(r.adapter.calls[1]?.message ?? "");
+    expect(token).not.toBe(tokenOf(r.adapter.calls[0]?.message ?? ""));
+    expect(restarted.status(runId).live?.tokenHash).toBe(hashToken(token));
+    expect(
+      await restarted.complete({
+        token,
+        outcome: "blocked",
+        fields: { reason: "r" },
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
+  it("a continuation turn carries the same token as the first turn", async () => {
+    const { engine, adapter, store } = await make({ tokenSecret: secret });
+    const { runId } = await engine.startRun("review-loop", { topic: "rust" });
+    await engine.tick();
+    const first = lastToken(adapter);
+    await engine.progress({ token: first, note: "outline done" });
+    // The turn ended after a checkpoint; the row waits for its next turn.
+    store.tx((t) => {
+      const live = t.liveStageRun(runId);
+      if (!live) throw new Error("no live row");
+      t.updateStageRunIf(
+        live.stageRunId,
+        { state: "working", attempt: live.attempt },
+        { state: "submitted" },
+      );
+    });
+    await engine.tick();
+    expect(adapter.calls).toHaveLength(2);
+    const second = adapter.calls[1];
+    expect(second?.idempotencyKey).toBe(`${runId}:draft:1:2`);
+    expect(second?.message).toContain("outline done");
+    expect(tokenOf(second?.message ?? "")).toBe(first);
+    expect(engine.status(runId).live?.dispatchSeq).toBe(2);
+  });
+});
+
+describe("dispatch edge cases", () => {
+  it("a failed turn start records the stage run's real state", async () => {
+    const { engine, adapter, store } = await make();
+    const { runId } = await engine.startRun("review-loop", { topic: "rust" });
+    adapter.beforeStart = () => {
+      store.tx((t) => {
+        const live = t.liveStageRun(runId);
+        if (!live) throw new Error("no live row");
+        t.updateStageRunIf(
+          live.stageRunId,
+          { state: "submitted", attempt: 1 },
+          { state: "canceled" },
+        );
+      });
+      throw new Error("harness down");
+    };
+    await engine.tick();
+    const last = engine.status(runId).transitions.at(-1);
+    expect([last?.event, last?.fromState, last?.toState]).toEqual([
+      "turn_start_failed",
+      "canceled",
+      "canceled",
+    ]);
+  });
+
+  it("a stage run completed during the turn start gets its start time", async () => {
+    const { engine, adapter, store, clock } = await make();
+    const { runId } = await engine.startRun("review-loop", { topic: "rust" });
+    adapter.beforeStart = async (p) => {
+      await engine.complete({
+        token: tokenOf(p.message),
+        outcome: "blocked",
+        fields: { reason: "fast" },
+      });
+    };
+    await engine.tick();
+    const row = store.tx((t) =>
+      t.listStageRuns({ limit: 10 }).find((s) => s.runId === runId),
+    );
+    expect(row?.state).toBe("completed");
+    expect(row?.adapterRunId).toBe("fr_1");
+    expect(row?.startedAt).toBe(clock.now());
   });
 });

@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { Capabilities, HarnessAdapter } from "../adapter/types.js";
 import { validateJson } from "../format/jsonschema.js";
 import type { LoadedDefinition } from "../format/load.js";
@@ -6,6 +7,7 @@ import type { HostRegistry } from "../host/registry.js";
 import type {
   GateRow,
   RunRow,
+  StageRunPatch,
   StageRunRow,
   Store,
   StoreTx,
@@ -34,7 +36,7 @@ import {
 } from "./events.js";
 import { newRunId } from "./ids.js";
 import { type Pinned, PinnedDefinitions } from "./pinned.js";
-import { hashesEqual, mintToken } from "./tokens.js";
+import { deriveToken, hashToken, MIN_TOKEN_SECRET_BYTES } from "./tokens.js";
 import { descend, errorMessage, isPlainObject } from "./values.js";
 
 export {
@@ -67,6 +69,14 @@ export interface EngineOptions {
    * started. True by default.
    */
   dispatch?: boolean;
+  /**
+   * At least 32 bytes, from which each attempt's completion token is
+   * derived. Keep it out of the store (a host reads it from a file only it
+   * can read). Without it the engine uses a random secret held in memory, so
+   * a turn resent after a restart carries a new token and a turn that the
+   * harness had already started under the old one cannot complete.
+   */
+  tokenSecret?: Uint8Array;
 }
 
 export interface RunStatusView {
@@ -82,13 +92,6 @@ export const COMPLETION_TOOLS = ["stage_complete", "stage_progress"];
 
 const DEFAULT_TICK_MS = 5000;
 const TICK_BATCH = 100;
-
-/** A dispatch whose turn was not yet recorded, kept to resend it unchanged. */
-interface PendingDispatch {
-  dispatchSeq: number;
-  tokenHash: string;
-  message: string;
-}
 
 interface Prepared {
   stageRunId: string;
@@ -109,7 +112,7 @@ export class Engine {
   private readonly dispatching: boolean;
   private readonly pinned = new PinnedDefinitions();
   private readonly events = new Emitter();
-  private readonly pending = new Map<string, PendingDispatch>();
+  private readonly tokenSecret: Uint8Array;
   private caps?: Promise<Capabilities>;
   private timer?: ReturnType<typeof setInterval>;
   private ticking?: Promise<void>;
@@ -120,6 +123,14 @@ export class Engine {
     this.clock = o.clock ?? systemClock;
     this.tickMs = o.tickMs ?? DEFAULT_TICK_MS;
     this.dispatching = o.dispatch !== false;
+    if (o.tokenSecret && o.tokenSecret.length < MIN_TOKEN_SECRET_BYTES) {
+      throw new Error(
+        `tokenSecret must be at least ${MIN_TOKEN_SECRET_BYTES} bytes`,
+      );
+    }
+    this.tokenSecret = o.tokenSecret
+      ? Uint8Array.from(o.tokenSecret)
+      : randomBytes(MIN_TOKEN_SECRET_BYTES);
   }
 
   /** Reconciles stored work, then ticks every `tickMs` unless dispatch is off. */
@@ -226,6 +237,7 @@ export class Engine {
         this.clock.now(),
         p.token,
         p.callerAgent,
+        "completion_refused",
       );
       if (found.kind === "refused") return fail(found.error);
       if (found.kind === "completed") return repeated(t, found.row, p);
@@ -284,7 +296,14 @@ export class Engine {
     }
     return this.commit((t) => {
       const now = this.clock.now();
-      const found = byToken(t, this.pinned, now, p.token, p.callerAgent);
+      const found = byToken(
+        t,
+        this.pinned,
+        now,
+        p.token,
+        p.callerAgent,
+        "progress_refused",
+      );
       if (found.kind === "refused") return fail(found.error);
       if (found.kind === "completed") {
         return fail(
@@ -373,7 +392,7 @@ export class Engine {
 
   /**
    * Starts a turn for a submitted agent stage run, in three steps so a crash
-   * at any point is recoverable: record the dispatch (sequence and token),
+   * at any point is recoverable: record the dispatch (sequence and token hash),
    * call the harness outside any transaction, then record the turn.
    */
   private async dispatch(stageRunId: string): Promise<void> {
@@ -398,14 +417,16 @@ export class Engine {
         tools: [...COMPLETION_TOOLS],
       }));
     } catch (err) {
-      // The row stays submitted with its dispatch sequence; the next tick
-      // resends the same message under the same key.
+      // The row keeps its dispatch sequence; the next tick resends the same
+      // message under the same key.
       this.store.tx((t) => {
+        const row = t.getStageRun(stageRunId);
+        if (!row) return;
         t.appendTransition({
-          runId: this.runOf(t, stageRunId),
+          runId: row.runId,
           stageRunId,
-          fromState: "submitted",
-          toState: "submitted",
+          fromState: row.state,
+          toState: row.state,
           event: "turn_start_failed",
           outcome: null,
           actor: ENGINE_ACTOR,
@@ -442,40 +463,33 @@ export class Engine {
     const sessionKey = this.sessionKey(run, stage);
     // A dispatch recorded but whose turn was never recorded is resent under
     // the same key, so a harness that did accept it does not start it twice.
+    // The token is derived from the attempt, so the resent message is the
+    // same one, and a continuation carries the first turn's token.
     const unrecorded = row.dispatchSeq > 0 && row.adapterRunId === null;
-    const held = this.pending.get(stageRunId);
-    let dispatchSeq = row.dispatchSeq;
-    let text: string;
-    if (
-      unrecorded &&
-      held &&
-      held.dispatchSeq === row.dispatchSeq &&
-      row.tokenHash !== null &&
-      hashesEqual(held.tokenHash, row.tokenHash)
-    ) {
-      text = held.message;
-    } else {
-      // A fresh token. After a crash between steps, a harness that had
-      // accepted the earlier turn runs it with the earlier token, which this
-      // replaces; that turn then ends without a result.
-      if (!unrecorded) dispatchSeq = row.dispatchSeq + 1;
-      const { token, hash } = mintToken();
+    const dispatchSeq = unrecorded ? row.dispatchSeq : row.dispatchSeq + 1;
+    const token = deriveToken(this.tokenSecret, row.idempotencyKey);
+    const hash = hashToken(token);
+    // The hash is set when the attempt is first dispatched. It differs only
+    // when the secret changed (a restart without a configured secret); the
+    // new hash then replaces it, so this turn can complete.
+    const patch: StageRunPatch = {};
+    if (row.tokenHash !== hash) patch.tokenHash = hash;
+    if (!unrecorded) {
+      patch.dispatchSeq = dispatchSeq;
+      patch.adapterRunId = null;
+    }
+    if (Object.keys(patch).length > 0) {
       const ok = t.updateStageRunIf(
         stageRunId,
         { state: "submitted", attempt: row.attempt },
-        { dispatchSeq, tokenHash: hash, adapterRunId: null },
+        patch,
       );
       if (!ok) return undefined;
-      text =
-        row.turnsUsed === 0
-          ? this.renderFor(t, run, pinned, stage, token)
-          : renderContinuation(row.progressNote, token, stage.outcomes);
-      this.pending.set(stageRunId, {
-        dispatchSeq,
-        tokenHash: hash,
-        message: text,
-      });
     }
+    const text =
+      row.turnsUsed === 0
+        ? this.renderFor(t, run, pinned, stage, token)
+        : renderContinuation(row.progressNote, token, stage.outcomes);
     return {
       stageRunId,
       attempt: row.attempt,
@@ -498,7 +512,6 @@ export class Engine {
     adapterRunId: string,
     emit: EmitFn,
   ): string | undefined {
-    this.pending.delete(prep.stageRunId);
     const row = t.getStageRun(prep.stageRunId);
     if (!row) return undefined;
     const run = t.getRun(row.runId);
@@ -558,6 +571,7 @@ export class Engine {
           adapterRunId,
           sessionKey: prep.sessionKey,
           turnsUsed: row.turnsUsed + 1,
+          startedAt: row.startedAt ?? now,
         },
       );
     }
@@ -622,12 +636,6 @@ export class Engine {
       now: this.clock.now(),
       emit,
     };
-  }
-
-  private runOf(t: StoreTx, stageRunId: string): string {
-    const row = t.getStageRun(stageRunId);
-    if (!row) throw new Error(`unknown stage run ${stageRunId}`);
-    return row.runId;
   }
 
   /** Runs `fn` in one transaction and emits its events after the commit. */
