@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeAdapter } from "../../../src/adapter/fake.js";
 import { Engine } from "../../../src/engine/engine.js";
 import { createRegistry } from "../../../src/host/registry.js";
@@ -392,8 +392,48 @@ describe("mcp input handling", () => {
     const output = new PassThrough();
     const server = createMcpServer({ engine: completion, input, output });
     cleanup.push(() => server.close());
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     output.emit("error", new Error("EPIPE"));
     await server.done;
+    logged.mockRestore();
+  });
+
+  it("commits nothing after an output error, buffered or later lines alike", async () => {
+    const calls: string[] = [];
+    const engine = {
+      complete: async (p: { token: string }) => {
+        calls.push(p.token);
+        return { ok: true as const, next: null, applied: "now" as const };
+      },
+      progress: async (p: { token: string }) => {
+        calls.push(p.token);
+        return { ok: true as const, next: null, applied: "now" as const };
+      },
+    };
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const server = createMcpServer({ engine, input, output });
+    cleanup.push(() => server.close());
+    const callLine = (token: string) =>
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: token,
+        method: "tools/call",
+        params: {
+          name: "stage_complete",
+          arguments: { token, outcome: "drafted" },
+        },
+      });
+    // A whole request without its newline is still in the buffer.
+    input.write(callLine("buffered"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    output.emit("error", new Error("EPIPE"));
+    input.write(`\n${callLine("later")}\n`);
+    input.end();
+    await server.done;
+    expect(calls).toEqual([]);
+    expect(logged).toHaveBeenCalledWith("sekaisen-mcp: EPIPE");
+    logged.mockRestore();
   });
 });
 

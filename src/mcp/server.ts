@@ -187,7 +187,9 @@ export function createMcpServer(o: McpServerOptions): McpServer {
   const takeLine = (line: string): void => {
     const text = line.endsWith("\r") ? line.slice(0, -1) : line;
     if (text.trim() === "") return;
-    enqueue(() => handle(text));
+    // A line queued before the server closed is dropped, not handled: its
+    // answer could never be sent, so it must not commit anything either.
+    enqueue(() => (closed ? undefined : handle(text)));
   };
   const feed = (text: string): void => {
     let rest = text;
@@ -230,10 +232,16 @@ export function createMcpServer(o: McpServerOptions): McpServer {
   };
   const onData = (chunk: Buffer | string): void =>
     feed(typeof chunk === "string" ? chunk : decoder.write(chunk));
+  /** Stops reading: later input and a partial line in the buffer are dropped. */
+  const stop = (): void => {
+    closed = true;
+    o.input.off("data", onData);
+    buf = "";
+    end();
+  };
   const onFail = (err: Error): void => {
     console.error(`sekaisen-mcp: ${err.message}`);
-    closed = true;
-    end();
+    stop();
   };
   o.input.on("data", onData);
   o.input.on("end", end);
@@ -242,11 +250,7 @@ export function createMcpServer(o: McpServerOptions): McpServer {
   o.output.on("error", onFail);
 
   return {
-    close() {
-      closed = true;
-      o.input.off("data", onData);
-      end();
-    },
+    close: stop,
     done,
   };
 }
