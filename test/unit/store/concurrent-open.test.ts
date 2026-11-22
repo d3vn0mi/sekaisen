@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -47,6 +47,12 @@ beforeAll(async () => {
   ]);
   expect(result.out).toBe("");
   writeFileSync(path.join(built, "package.json"), '{"type":"module"}');
+  // As in the package, the compiled sources read their version from the
+  // package.json one folder up.
+  copyFileSync(
+    path.join(root, "package.json"),
+    path.join(scratch, "package.json"),
+  );
   writeFileSync(
     path.join(built, "open.mjs"),
     `import { openSqliteStore } from "./store/sqlite.js";

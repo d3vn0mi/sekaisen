@@ -21,7 +21,8 @@
     "./mcp": {
       "types": "./dist/mcp/server.d.ts",
       "default": "./dist/mcp/server.js"
-    }
+    },
+    "./schema.json": "./dist/format/schema.json"
   },
   "files": [
     "dist",

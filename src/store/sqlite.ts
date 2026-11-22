@@ -4,7 +4,7 @@ import {
   type StatementResultingChanges,
   type StatementSync,
 } from "node:sqlite";
-import { VERSION } from "../index.js";
+import { VERSION } from "../version.js";
 import { MIGRATIONS, SCHEMA_VERSION } from "./migrations.js";
 import type {
   DefinitionRow,

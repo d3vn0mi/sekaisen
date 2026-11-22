@@ -230,7 +230,10 @@ derived from. `--agent` names the agent the connection belongs to, so the engine
 completion for another agent's stage. A harness that speaks MCP but has no plugin system needs
 nothing else for completion; it still needs an adapter for the required calls.
 
-The engine itself (`Engine`) is not yet exported from the package root; that arrives with the release.
+The package root exports `Engine` with the store, the loader, the checks, the simulator and the
+adapter types, so a host wires them together itself; `sekaisen/mcp` exports `createMcpServer`, the
+server behind `sekaisen-mcp`, for a host that serves completions over its own streams, and
+`sekaisen/schema.json` is the definition schema.
 
 ## A minimal adapter
 

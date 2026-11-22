@@ -6,7 +6,7 @@ import {
   stageProgressTool,
 } from "../completion/tools.js";
 import type { Engine } from "../engine/engine.js";
-import { VERSION } from "../index.js";
+import { VERSION } from "../version.js";
 
 /** The protocol version this server speaks first. */
 export const PROTOCOL_VERSION = "2025-06-18";

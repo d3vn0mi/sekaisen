@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -69,6 +70,12 @@ beforeAll(async () => {
   ]);
   expect(schema.out).toBe("");
   writeFileSync(path.join(built, "package.json"), '{"type":"module"}');
+  // As in the package, the compiled sources read their version from the
+  // package.json one folder up.
+  copyFileSync(
+    path.join(root, "package.json"),
+    path.join(scratch, "package.json"),
+  );
   // The compiled loader imports `yaml`; resolve it from the repository.
   symlinkSync(
     path.join(root, "node_modules"),
