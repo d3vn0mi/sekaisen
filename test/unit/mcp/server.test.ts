@@ -83,6 +83,29 @@ function wire(
   };
 }
 
+/** Collects the JSON lines written to `output`; `take(n)` awaits n of them. */
+function collector(output: PassThrough): {
+  take(n: number): Promise<Reply[]>;
+} {
+  const got: string[] = [];
+  const waiting: Array<() => void> = [];
+  let buf = "";
+  output.setEncoding("utf8");
+  output.on("data", (d: string) => {
+    buf += d;
+    const parts = buf.split("\n");
+    buf = parts.pop() ?? "";
+    got.push(...parts);
+    for (const w of waiting.splice(0)) w();
+  });
+  return {
+    async take(n) {
+      while (got.length < n) await new Promise<void>((r) => waiting.push(r));
+      return got.splice(0, n).map((l) => JSON.parse(l));
+    },
+  };
+}
+
 function fileStore(): { path: string; open(): Store } {
   const dir = mkdtempSync(path.join(tmpdir(), "sekaisen-mcp-"));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -322,6 +345,7 @@ describe("mcp input handling", () => {
     const { completion } = await pair();
     const input = new PassThrough();
     const output = new PassThrough();
+    const replies = collector(output);
     const server = createMcpServer({ engine: completion, input, output });
     cleanup.push(() => server.close());
     const chunk = "y".repeat(64 * 1024);
@@ -330,17 +354,18 @@ describe("mcp input handling", () => {
       `\n${JSON.stringify({ jsonrpc: "2.0", id: 9, method: "ping" })}\n`,
     );
     input.end();
-    await server.done;
-    const lines = (output.read() as Buffer).toString().trim().split("\n");
-    expect(
-      lines.map((l) => JSON.parse(l).error?.message ?? JSON.parse(l).id),
-    ).toEqual(["line too long", 9]);
+    const got = await replies.take(2);
+    expect(got.map((r) => r.error?.message ?? r.id)).toEqual([
+      "line too long",
+      9,
+    ]);
   });
 
   it("parses CRLF lines and a multi-byte character split across chunks", async () => {
     const { completion } = await pair();
     const input = new PassThrough();
     const output = new PassThrough();
+    const replies = collector(output);
     const server = createMcpServer({ engine: completion, input, output });
     cleanup.push(() => server.close());
     const bytes = Buffer.from(
@@ -350,9 +375,8 @@ describe("mcp input handling", () => {
     input.write(bytes.subarray(0, cut));
     input.write(bytes.subarray(cut));
     input.end();
-    await server.done;
-    const reply = JSON.parse((output.read() as Buffer).toString());
-    expect(reply.id).toBe("é€");
+    const [reply] = await replies.take(1);
+    expect(reply?.id).toBe("é€");
   });
 
   it("a stage_complete call with missing arguments is a tool error", async () => {
@@ -389,6 +413,7 @@ describe("sekaisen-mcp main", () => {
       err,
       input,
       output,
+      replies: collector(output),
       io: { err: (t: string) => err.push(t), input, output },
     };
   }
@@ -498,9 +523,9 @@ describe("sekaisen-mcp main", () => {
     );
     t.input.end();
     expect(await running).toBe(0);
-    const reply = JSON.parse((t.output.read() as Buffer).toString());
-    expect(reply.result.isError).toBe(true);
-    expect(reply.result.content[0].type).toBe("text");
+    const [reply] = await t.replies.take(1);
+    expect(reply?.result.isError).toBe(true);
+    expect(reply?.result.content[0].type).toBe("text");
   });
 
   it("serves tools over the streams and exits 0 when stdin closes", async () => {
@@ -527,8 +552,7 @@ describe("sekaisen-mcp main", () => {
     );
     t.input.end();
     expect(await running).toBe(0);
-    const lines = (t.output.read() as Buffer).toString().trim().split("\n");
-    expect(lines).toHaveLength(1);
-    expect(JSON.parse(lines[0] as string).result.tools).toHaveLength(2);
+    const [reply] = await t.replies.take(1);
+    expect(reply?.result.tools).toHaveLength(2);
   });
 });
