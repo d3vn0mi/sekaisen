@@ -236,9 +236,12 @@ describe("dispatch", () => {
     };
     await engine.tick();
     expect(adapter.aborted).toEqual(["fr_1"]);
-    expect(engine.status(runId).transitions.at(-1)?.event).toBe(
-      "turn_start_superseded",
-    );
+    expect(
+      engine
+        .status(runId)
+        .transitions.slice(-3)
+        .map((x) => x.event),
+    ).toEqual(["turn_start_superseded", "abort_requested", "abort_settled"]);
   });
 
   it("the tick opens the operator gate after the agents", async () => {

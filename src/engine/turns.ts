@@ -45,11 +45,52 @@ export interface TxCtx {
 
 /**
  * A harness turn to abort, recorded on its stage run (`abortRunId`) in the
- * transaction that decided it, and cleared once the harness has answered.
+ * transaction that decided it, and cleared once the harness has answered,
+ * cannot abort at all, or has failed `MAX_ABORT_ATTEMPTS` calls.
  */
 export interface AbortRequest {
   stageRunId: string;
   adapterRunId: string;
+}
+
+/** Failed abort calls after which a request is given up. */
+export const MAX_ABORT_ATTEMPTS = 5;
+const ABORT_BACKOFF_MS = 60_000;
+const ABORT_BACKOFF_CAP_MS = 30 * 60_000;
+
+/** The wait before the next abort call after `failed` failed ones. */
+export function abortBackoffMs(failed: number): number {
+  return Math.min(
+    ABORT_BACKOFF_CAP_MS,
+    ABORT_BACKOFF_MS * 2 ** Math.max(0, failed - 1),
+  );
+}
+
+/** The columns that record a new abort request, due at once. */
+export function abortRequest(adapterRunId: string, now: number): StageRunPatch {
+  return { abortRunId: adapterRunId, abortAttempts: 0, abortNextAt: now };
+}
+
+/** Logs an abort event against a stage run in the state it is now in. */
+export function logAbort(
+  t: StoreTx,
+  row: Pick<StageRunRow, "runId" | "stageRunId" | "state">,
+  event: "abort_requested" | "abort_settled" | "abort_abandoned",
+  actor: string,
+  at: number,
+  detail: Record<string, unknown>,
+): void {
+  t.appendTransition({
+    runId: row.runId,
+    stageRunId: row.stageRunId,
+    fromState: row.state,
+    toState: row.state,
+    event,
+    outcome: null,
+    actor,
+    at,
+    detail,
+  });
 }
 
 /** A tick transaction that also needs the harness's capabilities. */
@@ -169,15 +210,22 @@ export function recordTimeout(
     row,
     stage,
     "timeout",
-    inFlight === undefined ? {} : { abortRunId: inFlight },
+    inFlight === undefined ? {} : abortRequest(inFlight, c.now),
     {
       deadlineAt: row.deadlineAt,
       ...(inFlight === undefined ? {} : { adapterRunId: inFlight }),
     },
   );
-  return inFlight === undefined
-    ? undefined
-    : { stageRunId: row.stageRunId, adapterRunId: inFlight };
+  if (inFlight === undefined) return undefined;
+  logAbort(
+    c.t,
+    { ...row, state: "failed" },
+    "abort_requested",
+    actorOf(ctx),
+    c.now,
+    { adapterRunId: inFlight },
+  );
+  return { stageRunId: row.stageRunId, adapterRunId: inFlight };
 }
 
 /**
@@ -193,15 +241,54 @@ export function recordLost(c: TxCtx, seen: StageRunRow): void {
   endAttempt(ctx, row, stage, "lost", {}, { adapterRunId: row.adapterRunId });
 }
 
-/** Drops an abort request once the harness has answered it. */
-export function settleAbort(c: TxCtx, req: AbortRequest): void {
+/**
+ * Drops an abort request the harness has answered, or one it can never
+ * take, and logs how it ended.
+ */
+export function settleAbort(
+  c: TxCtx,
+  req: AbortRequest,
+  answer: { aborted: boolean; reason?: string },
+): void {
   const row = c.t.getStageRun(req.stageRunId);
   if (row?.abortRunId !== req.adapterRunId) return;
-  c.t.updateStageRunIf(
+  const ok = c.t.updateStageRunIf(
     row.stageRunId,
     { state: row.state, attempt: row.attempt },
-    { abortRunId: null },
+    { abortRunId: null, abortNextAt: null },
   );
+  if (!ok) return;
+  logAbort(c.t, row, "abort_settled", actorOf(c), c.now, {
+    adapterRunId: req.adapterRunId,
+    ...answer,
+  });
+}
+
+/**
+ * Counts a failed abort call: the next one waits out a doubling backoff,
+ * and after `MAX_ABORT_ATTEMPTS` failures the request is given up and logged.
+ */
+export function failAbort(c: TxCtx, req: AbortRequest, error: string): void {
+  const row = c.t.getStageRun(req.stageRunId);
+  if (row?.abortRunId !== req.adapterRunId) return;
+  const attempts = row.abortAttempts + 1;
+  const abandon = attempts >= MAX_ABORT_ATTEMPTS;
+  const ok = c.t.updateStageRunIf(
+    row.stageRunId,
+    { state: row.state, attempt: row.attempt },
+    abandon
+      ? { abortRunId: null, abortNextAt: null, abortAttempts: attempts }
+      : {
+          abortAttempts: attempts,
+          abortNextAt: c.now + abortBackoffMs(attempts),
+        },
+  );
+  if (!ok || !abandon) return;
+  logAbort(c.t, row, "abort_abandoned", actorOf(c), c.now, {
+    adapterRunId: req.adapterRunId,
+    attempts,
+    error: clip(error),
+  });
 }
 
 /** Stops watching a turn there is nothing more to learn about. */

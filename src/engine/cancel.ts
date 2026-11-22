@@ -1,6 +1,11 @@
 import { endRun, newAttempt, type RunCtx } from "./advance.js";
 import { append, move, transition } from "./endings.js";
-import type { AbortRequest, TxCtx } from "./turns.js";
+import {
+  type AbortRequest,
+  abortRequest,
+  logAbort,
+  type TxCtx,
+} from "./turns.js";
 
 /**
  * Cancels a run, as one transaction: the live stage run and the run move to
@@ -48,13 +53,23 @@ export function cancelRun(
       dispatchedAt: null,
       waitReason: null,
       wakeAt: null,
-      ...(abort === undefined ? {} : { abortRunId: abort.adapterRunId }),
+      ...(abort === undefined ? {} : abortRequest(abort.adapterRunId, c.now)),
     });
     append(
       ctx,
       transition(live, "canceled", "stage_canceled", actor),
       abort === undefined ? {} : { adapterRunId: abort.adapterRunId },
     );
+    if (abort !== undefined) {
+      logAbort(
+        c.t,
+        { ...live, state: "canceled" },
+        "abort_requested",
+        actor,
+        c.now,
+        { adapterRunId: abort.adapterRunId },
+      );
+    }
     const gate = c.t.getGate(live.stageRunId);
     if (gate && gate.resolvedBy === null) {
       c.t.upsertGate({

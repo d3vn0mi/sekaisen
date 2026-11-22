@@ -55,8 +55,11 @@ import { recordCallError, recordCallResult, stepStage } from "./stages.js";
 import { deriveToken, hashToken, MIN_TOKEN_SECRET_BYTES } from "./tokens.js";
 import {
   type AbortRequest,
+  abortRequest,
   admission,
+  failAbort,
   forgetTurn,
+  logAbort,
   recordLost,
   recordTimeout,
   recordTurnEnd,
@@ -77,6 +80,7 @@ export type {
   EngineEvent,
   EngineEvents,
 } from "./events.js";
+export { abortBackoffMs, MAX_ABORT_ATTEMPTS } from "./turns.js";
 
 /** Where the engine finds the definition a new run starts on. */
 export interface DefinitionSource {
@@ -132,10 +136,15 @@ const DEFAULT_TICK_MS = 5000;
 const DEFAULT_CALL_TIMEOUT_MS = 30_000;
 const TICK_BATCH = 100;
 /**
- * Most turns one reconciliation reads. Turns in flight are bounded by the
- * harness's lanes, far below this.
+ * How long, on the engine's clock, a tick goes on starting abort calls once
+ * its other work is done; the rest wait for the next tick.
  */
-const RECONCILE_BATCH = 10_000;
+const ABORT_BUDGET_MS = 10_000;
+/**
+ * How many call timeouts past its deadline a turn found in flight at start
+ * may wait for a harness that cannot be read, before it times out.
+ */
+const RECONCILE_GRACE_CALLS = 10;
 
 interface Prepared {
   stageRunId: string;
@@ -166,6 +175,9 @@ export class Engine {
    * The tick settles them as reconciliation would.
    */
   private readonly unreconciled = new Set<string>();
+  /** Whether the start-up reconciliation has taken stock of the store. */
+  private stocked = false;
+  private reconciling?: Promise<void>;
   /** Harness turns an abort is being asked for right now. */
   private readonly aborting = new Set<string>();
   private timer?: ReturnType<typeof setInterval>;
@@ -457,59 +469,100 @@ export class Engine {
   }
 
   /**
-   * Settles what the store says was in flight when the engine last stopped.
+   * The start-up operation that settles what the store says was in flight
+   * when the engine last stopped; `start()` calls it before the first tick.
+   *
    * Every agent stage run with a turn in flight is read from the harness: a
    * turn that ended is classified as the tick would, one the harness no
-   * longer knows ends its attempt `lost` (its retry policy applies), and one
-   * still running is kept. A turn that cannot be read yet is kept and
-   * settled by a later tick. Aborts requested before the stop are asked
-   * again. Stage runs without a turn (waits, gates, checks, actions) resume
-   * from their stored times and are not touched. Every transition it writes
-   * names `engine:reconcile`; calling it again writes nothing new. `start()`
-   * calls it; it does nothing when the engine only takes completions.
+   * longer knows ends its attempt `lost` (its retry policy applies, even
+   * past its deadline), and one still running is kept. A turn that cannot
+   * be read yet is kept and settled by a later tick; past its deadline it
+   * waits for the harness at most ten call timeouts, then times out. Aborts
+   * still due are asked again. Stage runs without a turn (waits, gates,
+   * checks, actions) resume from their stored times and are not touched.
+   * Every transition it writes names `engine:reconcile`.
+   *
+   * A later call only re-checks the turns the first one could not settle;
+   * it never takes in turns started since, so their deadlines apply as on
+   * any tick. Calling it again writes nothing new. A tick waits for a
+   * reconciliation in progress. It does nothing when the engine only takes
+   * completions.
    */
-  async reconcile(): Promise<void> {
-    if (!this.dispatching) return;
+  reconcile(): Promise<void> {
+    if (!this.dispatching) return Promise.resolve();
+    if (this.reconciling) return this.reconciling;
+    let ids: string[];
+    try {
+      // Taken in one synchronous step, before anything awaits, so a tick
+      // never sees a start-up turn outside the set.
+      if (!this.stocked) {
+        for (const id of this.store.tx((t) => t.inFlightTurnIds())) {
+          this.unreconciled.add(id);
+        }
+        this.stocked = true;
+      }
+      ids = [...this.unreconciled];
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    this.reconciling = this.settleTurns(ids).finally(() => {
+      this.reconciling = undefined;
+    });
+    return this.reconciling;
+  }
+
+  private async settleTurns(ids: string[]): Promise<void> {
+    if (ids.length > TICK_BATCH) {
+      this.report(`reconciling ${ids.length} turns in flight`);
+    }
     let caps: Capabilities | undefined;
     try {
       caps = await this.capabilities();
     } catch (err) {
       this.report(err);
     }
-    if (caps) await this.flushAborts(caps);
-    const turns = this.store
-      .tx((t) =>
-        t.listStageRuns({
-          state: ["working"],
-          inFlight: true,
-          wakes: false,
-          limit: RECONCILE_BATCH,
-        }),
-      )
-      .filter((row) => row.adapterRunId !== null);
-    for (const row of turns) this.unreconciled.add(row.stageRunId);
-    for (const row of turns) {
+    for (const id of ids) {
       try {
+        const row = this.store.tx((t) => t.getStageRun(id));
+        if (row?.state !== "working") {
+          this.unreconciled.delete(id);
+          continue;
+        }
         await this.observe(row, caps);
       } catch (err) {
         this.report(err);
       }
     }
+    if (caps) await this.flushAborts(caps);
+  }
+
+  /** Forgets start-up turns that are no longer working. */
+  private pruneUnreconciled(): void {
+    if (this.unreconciled.size === 0) return;
+    this.store.tx((t) => {
+      for (const id of [...this.unreconciled]) {
+        if (t.getStageRun(id)?.state !== "working") {
+          this.unreconciled.delete(id);
+        }
+      }
+    });
   }
 
   // --- the tick -----------------------------------------------------------
 
   private async walk(): Promise<void> {
     if (!this.dispatching) return;
+    await this.reconciling?.catch(() => undefined);
+    this.pruneUnreconciled();
     let caps: Capabilities | undefined;
     try {
       caps = await this.capabilities();
     } catch (err) {
-      // Deadlines are still enforced; aborts, turn ends and dispatch wait
-      // for the capabilities.
+      // Deadlines are still enforced, except that a turn found in flight at
+      // start waits a grace past its own for the harness; aborts, turn ends
+      // and dispatch wait for the capabilities.
       this.report(err);
     }
-    if (caps) await this.flushAborts(caps);
     // Turns first, so a continuation or retry they submit is dispatched in
     // the same pass.
     const inFlight = this.store.tx((t) =>
@@ -541,6 +594,8 @@ export class Engine {
         this.report(err);
       }
     }
+    // Last, so a harness slow to abort cannot hold up the work above.
+    await this.flushAborts(caps);
   }
 
   /**
@@ -612,13 +667,26 @@ export class Engine {
     const id = row.stageRunId;
     const settling = this.unreconciled.has(id);
     const actor = settling ? RECONCILE_ACTOR : undefined;
-    const overdue =
-      row.state === "working" && deadlinePassed(row, this.clock.now());
+    const now = this.clock.now();
+    const overdue = row.state === "working" && deadlinePassed(row, now);
     if (overdue && !settling) {
       await this.timeOut(row, caps);
       return;
     }
-    if (!caps) return;
+    // A start-up turn waits for the harness past its deadline, but not for
+    // ever: once the grace is over, a harness that cannot answer times it out.
+    const graceOver =
+      overdue &&
+      row.deadlineAt !== null &&
+      now > row.deadlineAt + RECONCILE_GRACE_CALLS * this.callTimeoutMs;
+    const giveUp = async () => {
+      this.unreconciled.delete(id);
+      await this.timeOut(row, caps, actor);
+    };
+    if (!caps) {
+      if (graceOver) await giveUp();
+      return;
+    }
     const adapterRunId = row.adapterRunId;
     if (
       adapterRunId === null ||
@@ -633,8 +701,12 @@ export class Engine {
       outcome = await this.call("readRunOutcome", () =>
         this.adapter.readRunOutcome(adapterRunId),
       );
-    } catch {
+    } catch (err) {
       // Read again on the next tick.
+      if (settling) {
+        this.report(`reading turn ${adapterRunId}: ${errorMessage(err)}`);
+        if (graceOver) await giveUp();
+      }
       return;
     }
     this.unreconciled.delete(id);
@@ -672,12 +744,18 @@ export class Engine {
     if (abort !== undefined && caps) await this.abort(abort, caps);
   }
 
-  /** Asks again for the aborts the store holds, oldest first. */
+  /**
+   * Asks for the stored aborts that are due, earliest first, so one in
+   * backoff never crowds out the others. Stops starting calls once
+   * `ABORT_BUDGET_MS` have passed; the rest wait for the next tick.
+   */
   private async flushAborts(caps: Capabilities): Promise<void> {
-    const requested = this.store.tx((t) =>
-      t.listStageRuns({ abortRequested: true, limit: TICK_BATCH }),
+    const started = this.clock.now();
+    const due = this.store.tx((t) =>
+      t.listStageRuns({ abortDueBy: started, limit: TICK_BATCH }),
     );
-    for (const row of requested) {
+    for (const row of due) {
+      if (this.clock.now() - started >= ABORT_BUDGET_MS) return;
       if (row.abortRunId === null) continue;
       await this.abort(
         { stageRunId: row.stageRunId, adapterRunId: row.abortRunId },
@@ -687,23 +765,39 @@ export class Engine {
   }
 
   /**
-   * Asks the harness to stop a turn, where it can. The request is dropped
-   * once the harness answers, or when it cannot abort at all; a call that
-   * fails leaves it for the next tick.
+   * Asks the harness to stop a turn, where it can. The request is dropped,
+   * and logged, once the harness answers or when it cannot abort at all. A
+   * call that fails is reported and asked again after a doubling backoff,
+   * until `MAX_ABORT_ATTEMPTS` failures give it up.
    */
   private async abort(req: AbortRequest, caps: Capabilities): Promise<void> {
     if (this.aborting.has(req.adapterRunId)) return;
     this.aborting.add(req.adapterRunId);
     try {
       const abortTurn = this.adapter.abortTurn?.bind(this.adapter);
-      if (caps.canAbort && abortTurn) {
-        try {
-          await this.call("abortTurn", () => abortTurn(req.adapterRunId));
-        } catch {
-          return;
-        }
+      if (!caps.canAbort || !abortTurn) {
+        this.commit((t, emit) =>
+          settleAbort(this.txCtx(t, emit), req, {
+            aborted: false,
+            reason: "the harness cannot abort turns",
+          }),
+        );
+        return;
       }
-      this.commit((t, emit) => settleAbort(this.txCtx(t, emit), req));
+      let aborted: boolean;
+      try {
+        aborted = await this.call("abortTurn", () =>
+          abortTurn(req.adapterRunId),
+        );
+      } catch (err) {
+        const error = errorMessage(err);
+        this.report(`aborting turn ${req.adapterRunId}: ${error}`);
+        this.commit((t, emit) => failAbort(this.txCtx(t, emit), req, error));
+        return;
+      }
+      this.commit((t, emit) =>
+        settleAbort(this.txCtx(t, emit), req, { aborted: aborted === true }),
+      );
     } finally {
       this.aborting.delete(req.adapterRunId);
     }
@@ -950,7 +1044,7 @@ export class Engine {
       t.updateStageRunIf(
         row.stageRunId,
         { state: row.state, attempt: row.attempt },
-        { abortRunId: adapterRunId },
+        abortRequest(adapterRunId, now),
       );
     }
     t.appendTransition({
@@ -964,6 +1058,9 @@ export class Engine {
       at: now,
       detail,
     });
+    if (!completed) {
+      logAbort(t, row, "abort_requested", ENGINE_ACTOR, now, { adapterRunId });
+    }
     return completed ? undefined : { stageRunId: row.stageRunId, adapterRunId };
   }
 

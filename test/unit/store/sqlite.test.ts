@@ -59,6 +59,8 @@ const stageRun = (over: Partial<NewStageRun> = {}): NewStageRun => ({
   waitReason: null,
   wakeAt: null,
   abortRunId: null,
+  abortAttempts: 0,
+  abortNextAt: null,
   ...over,
 });
 
@@ -794,36 +796,97 @@ describe("guards", () => {
 });
 
 describe("abort requests", () => {
-  it("lists stage runs with a turn still to abort, and round-trips the column", () => {
+  it("lists due abort requests by their next attempt, and round-trips the columns", () => {
     const store = open();
     store.tx((t) => {
       seed(t);
       t.insertStageRun(stageRun({ stageRunId: "a", stage: "a" }));
       t.insertStageRun(
-        stageRun({ stageRunId: "b", stage: "b", abortRunId: "h_1" }),
+        stageRun({
+          stageRunId: "b",
+          stage: "b",
+          abortRunId: "h_1",
+          abortAttempts: 2,
+          abortNextAt: 50,
+        }),
+      );
+      t.insertStageRun(
+        stageRun({
+          stageRunId: "c",
+          stage: "c",
+          abortRunId: "h_2",
+          abortNextAt: 10,
+        }),
       );
       const ids = (rows: StageRunRow[]) => rows.map((r) => r.stageRunId);
-      expect(ids(t.listStageRuns({ abortRequested: true, limit: 10 }))).toEqual(
-        ["b"],
-      );
-      expect(t.getStageRun("b")?.abortRunId).toBe("h_1");
-      expect(
-        t.updateStageRunIf(
-          "a",
-          { state: "submitted", attempt: 1 },
-          { abortRunId: "h_2" },
-        ),
-      ).toBe(true);
+      expect(ids(t.listStageRuns({ abortDueBy: 49, limit: 10 }))).toEqual([
+        "c",
+      ]);
+      expect(ids(t.listStageRuns({ abortDueBy: 50, limit: 10 }))).toEqual([
+        "c",
+        "b",
+      ]);
+      expect(t.getStageRun("b")).toMatchObject({
+        abortRunId: "h_1",
+        abortAttempts: 2,
+        abortNextAt: 50,
+      });
       expect(
         t.updateStageRunIf(
           "b",
           { state: "submitted", attempt: 1 },
-          { abortRunId: null },
+          { abortRunId: null, abortAttempts: 0, abortNextAt: null },
         ),
       ).toBe(true);
-      expect(ids(t.listStageRuns({ abortRequested: true, limit: 10 }))).toEqual(
-        ["a"],
+      expect(ids(t.listStageRuns({ abortDueBy: 100, limit: 10 }))).toEqual([
+        "c",
+      ]);
+    });
+  });
+});
+
+describe("inFlightTurnIds", () => {
+  it("returns every working stage run with a harness turn, without a limit", () => {
+    const store = open();
+    store.tx((t) => {
+      seed(t);
+      const turn = { state: "working" as const, dispatchedAt: 5 };
+      t.insertStageRun(
+        stageRun({
+          stageRunId: "x",
+          stage: "x",
+          ...turn,
+          adapterRunId: "h",
+          createdAt: 1,
+        }),
       );
+      // No harness run: a host stage or a dispatch not recorded yet.
+      t.insertStageRun(stageRun({ stageRunId: "y", stage: "y", ...turn }));
+      t.insertStageRun(
+        stageRun({
+          stageRunId: "z",
+          stage: "z",
+          state: "completed",
+          dispatchedAt: 5,
+          adapterRunId: "h2",
+        }),
+      );
+      for (let i = 0; i < 150; i++) {
+        t.insertStageRun(
+          stageRun({
+            stageRunId: `m${i}`,
+            stage: `m${i}`,
+            ...turn,
+            adapterRunId: `h${i}`,
+            createdAt: 10 + i,
+          }),
+        );
+      }
+      const ids = t.inFlightTurnIds();
+      expect(ids).toHaveLength(151);
+      expect(ids[0]).toBe("x");
+      expect(ids).not.toContain("y");
+      expect(ids).not.toContain("z");
     });
   });
 });

@@ -113,6 +113,10 @@ export interface StageRunRow {
    * whose capabilities cannot be read yet, does not lose the request.
    */
   abortRunId: string | null;
+  /** Abort calls for `abortRunId` that failed so far. */
+  abortAttempts: number;
+  /** When the abort of `abortRunId` is next asked for; null when none is pending. */
+  abortNextAt: number | null;
 }
 
 export interface TransitionRow {
@@ -221,15 +225,16 @@ export interface StoreTx {
    * Oldest first. `inFlight` keeps only stage runs with a turn in flight.
    * `wakes: false` keeps only stage runs without a wake time (agent stages).
    * `wakeBy` keeps only stage runs whose wake time is at or before it, and
-   * orders them by wake time, earliest first. `abortRequested` keeps only
-   * stage runs with a harness turn still to abort.
+   * orders them by wake time, earliest first. `abortDueBy` keeps only stage
+   * runs with a harness turn to abort whose next attempt is due at or before
+   * it, and orders them by that time, earliest first.
    */
   listStageRuns(filter: {
     state?: StageRunState[];
     inFlight?: boolean;
     wakes?: false;
     wakeBy?: number;
-    abortRequested?: true;
+    abortDueBy?: number;
     limit: number;
   }): StageRunRow[];
   /** False when the stage run no longer matches `expect`; the caller re-reads. */
@@ -239,6 +244,11 @@ export interface StoreTx {
     patch: StageRunPatch,
   ): boolean;
   findStageRunByTokenHash(hash: string): StageRunRow | undefined;
+  /**
+   * Every working agent stage run with a harness turn in flight, by id,
+   * oldest first. Ids only and unbounded, so a restart sees all of them.
+   */
+  inFlightTurnIds(): string[];
 
   /** Returns the new row id. */
   appendTransition(row: Omit<TransitionRow, "id">): number;

@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeAdapter } from "../../../src/adapter/fake.js";
 import type { RunOutcome } from "../../../src/adapter/types.js";
@@ -6,6 +9,7 @@ import {
   type EngineEvents,
   type EngineOptions,
 } from "../../../src/engine/engine.js";
+import { loadDefinition } from "../../../src/format/load.js";
 import { createRegistry } from "../../../src/host/registry.js";
 import type {
   GateRow,
@@ -61,7 +65,7 @@ function restarted(
 
 const rows = (r: Rig, runId: string): StageRunRow[] =>
   r.store.tx((t) =>
-    t.listStageRuns({ limit: 100 }).filter((s) => s.runId === runId),
+    t.listStageRuns({ limit: 1000 }).filter((s) => s.runId === runId),
   );
 
 const log = (r: Rig, runId: string): TransitionRow[] =>
@@ -519,71 +523,238 @@ describe("poll gates across a restart", () => {
   });
 });
 
-describe("persisted aborts", () => {
-  /** An engine on `r`'s store whose harness cannot report capabilities yet. */
-  function blind(r: Rig): Engine {
-    const adapter = new FakeAdapter();
-    adapter.capabilities = async () => {
-      throw new Error("not ready");
-    };
-    return restarted(r, adapter);
-  }
-
-  it("an abort requested while capabilities fail survives a restart and is flushed", async () => {
+describe("reconciliation bounds", () => {
+  it("covers every turn in flight, past one tick's batch, and says so", async () => {
     const r = await make();
-    const { runId } = await started(r);
+    r.adapter.caps = { ...r.adapter.caps, maxConcurrent: 500 };
+    const runIds: string[] = [];
+    for (let i = 0; i < 120; i++) {
+      runIds.push(
+        (await r.engine.startRun("review-loop", { topic: `t${i}` })).runId,
+      );
+    }
+    await r.engine.tick();
+    await r.engine.tick();
+    expect(r.adapter.calls).toHaveLength(120);
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      await blind(r).cancel(runId, "operator:a");
+      await restarted(r).reconcile();
+      expect(logged).toHaveBeenCalledWith(
+        expect.stringMatching(/reconciling 120 turns in flight/),
+      );
+    } finally {
+      logged.mockRestore();
+    }
+    for (const runId of runIds) {
+      expect(rows(r, runId)[0]?.ending).toBe("lost");
+    }
+  });
+
+  it("a stage with no retry of its own retries a lost attempt and the run goes on", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "sekaisen-reconcile-"));
+    try {
+      mkdirSync(path.join(dir, "briefs"));
+      writeFileSync(
+        path.join(dir, "briefs/solo.md"),
+        "Write {{inputs.topic}}.\n",
+      );
+      writeFileSync(
+        path.join(dir, "pipeline.yaml"),
+        [
+          "format: 1",
+          "id: solo",
+          "version: 1",
+          "start: solo",
+          "stages:",
+          "  solo:",
+          "    type: agent",
+          "    agent: drafter",
+          "    session: run",
+          "    brief: briefs/solo.md",
+          "    outcomes:",
+          "      done: { next: done }",
+          "  done: { type: end, status: completed }",
+          "  failed: { type: end, status: failed }",
+          "",
+        ].join("\n"),
+      );
+      const loaded = await loadDefinition(path.join(dir, "pipeline.yaml"));
+      expect(loaded.problems).toEqual([]);
+      const stage = loaded.def.stages.solo;
+      expect(stage?.type === "agent" && stage.retry).toEqual({
+        max: 1,
+        on: ["lost"],
+      });
+      const r = await make();
+      r.source.defs.set("solo", loaded);
+      const { runId } = await r.engine.startRun("solo", { topic: "x" });
+      await r.engine.tick();
+
+      const adapter = new FakeAdapter();
+      const engine = restarted(r, adapter);
+      await engine.start();
+      await engine.stop();
+      const [lost, retry] = rows(r, runId);
+      expect(lost).toMatchObject({ ending: "lost" });
+      expect(retry).toMatchObject({
+        state: "working",
+        idempotencyKey: `${runId}:solo:2`,
+      });
+      expect(engine.status(runId).run.status).toBe("working");
+      const token = /Your completion token is: (\S+)/.exec(
+        adapter.calls[0]?.message ?? "",
+      )?.[1];
+      expect(
+        await engine.complete({ token: token ?? "", outcome: "done" }),
+      ).toMatchObject({ ok: true, next: "done" });
+      expect(engine.status(runId).run.status).toBe("completed");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an overdue turn the harness never answers about times out after a grace", async () => {
+    const r = await make();
+    const { runId } = await started(r);
+    r.clock.advance(30 * MIN);
+    const adapter = new FakeAdapter();
+    adapter.beforeRead = () => {
+      throw new Error("harness unreachable");
+    };
+    const engine = restarted(r, adapter, { adapterCallTimeoutMs: 1000 });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await engine.reconcile();
+      // Ten call timeouts past the deadline at most.
+      r.clock.advance(10 * 1000);
+      await engine.tick();
+      expect(rows(r, runId)[0]).toMatchObject({ state: "working" });
+      // Each failed read is reported.
+      expect(logged).toHaveBeenCalledTimes(2);
+      expect(logged).toHaveBeenCalledWith(
+        expect.stringContaining("harness unreachable"),
+      );
+      r.clock.advance(1);
+      await engine.tick();
     } finally {
       logged.mockRestore();
     }
     expect(rows(r, runId)[0]).toMatchObject({
-      state: "canceled",
-      abortRunId: "fr_1",
+      state: "failed",
+      ending: "timeout",
     });
-
-    const adapter = new FakeAdapter();
-    const engine = restarted(r, adapter);
-    await engine.reconcile();
-    expect(adapter.aborted).toEqual(["fr_1"]);
-    expect(rows(r, runId)[0]?.abortRunId).toBeNull();
-    await engine.reconcile();
-    await engine.tick();
-    expect(adapter.aborted).toEqual(["fr_1"]);
+    expect(log(r, runId).find((x) => x.event === "timeout")?.actor).toBe(
+      RECONCILE,
+    );
   });
 
-  it("an abort the harness fails to take is kept and asked again by the tick", async () => {
+  it("a tick waits for a reconciliation in progress", async () => {
     const r = await make();
     const { runId } = await started(r);
-    let failing = true;
-    const abortTurn = r.adapter.abortTurn.bind(r.adapter);
-    r.adapter.abortTurn = async (id) => {
-      if (failing) throw new Error("abort failed");
-      return abortTurn(id);
+    const adapter = new FakeAdapter();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reads = 0;
+    adapter.beforeRead = async () => {
+      reads++;
+      await gate;
     };
-    await r.engine.cancel(runId, "operator:a");
-    expect(rows(r, runId)[0]?.abortRunId).toBe("fr_1");
-    await r.engine.tick();
-    expect(rows(r, runId)[0]?.abortRunId).toBe("fr_1");
-    failing = false;
-    await r.engine.tick();
-    expect(r.adapter.aborted).toEqual(["fr_1"]);
-    expect(rows(r, runId)[0]?.abortRunId).toBeNull();
+    const engine = restarted(r, adapter);
+    const reconciling = engine.reconcile();
+    const ticking = engine.tick();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const whileBlocked = reads;
+    release();
+    await reconciling;
+    await ticking;
+    // Only reconciliation read the turn; the tick waited for it.
+    expect(whileBlocked).toBe(1);
+    expect(reads).toBe(1);
+    expect(log(r, runId).filter((x) => x.event === "lost")).toHaveLength(1);
+    // The tick ran after reconciliation and dispatched the retry.
+    expect(adapter.calls.map((c) => c.idempotencyKey)).toEqual([
+      `${runId}:draft:2`,
+    ]);
   });
 
-  it("an abort is dropped once the harness answers or cannot abort", async () => {
+  it("a later reconcile only re-checks; it does not hold new turns past their deadline", async () => {
     const r = await make();
-    const declined = await started(r);
-    r.adapter.abortTurn = async () => false;
-    await r.engine.cancel(declined.runId, "operator:a");
-    expect(rows(r, declined.runId)[0]?.abortRunId).toBeNull();
+    const engine = r.engine;
+    await engine.start();
+    await engine.stop();
+    const { runId } = await r.engine.startRun("review-loop", { topic: "x" });
+    await engine.tick();
+    r.clock.advance(30 * MIN);
+    r.adapter.beforeRead = () => {
+      throw new Error("harness unreachable");
+    };
+    const before = log(r, runId);
+    await engine.reconcile();
+    expect(log(r, runId)).toEqual(before);
+    // Not one the start-up found: its deadline applies as on any tick.
+    await engine.tick();
+    expect(rows(r, runId)[0]).toMatchObject({
+      state: "failed",
+      ending: "timeout",
+    });
+    expect(log(r, runId).find((x) => x.event === "timeout")?.actor).toBe(
+      "engine",
+    );
+  });
 
-    const r2 = await make();
-    r2.adapter.caps = { ...r2.adapter.caps, canAbort: false };
-    const unsupported = await started(r2);
-    await r2.engine.cancel(unsupported.runId, "operator:a");
-    expect(rows(r2, unsupported.runId)[0]?.abortRunId).toBeNull();
-    expect(r2.adapter.aborted).toEqual([]);
+  it("drops a stage run from reconciliation once it is no longer working", async () => {
+    const r = await make();
+    const { runId, token } = await started(r);
+    const adapter = new FakeAdapter();
+    adapter.beforeRead = () => {
+      throw new Error("harness unreachable");
+    };
+    const engine = restarted(r, adapter);
+    const pending = () =>
+      (engine as unknown as { unreconciled: Set<string> }).unreconciled.size;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await engine.reconcile();
+      expect(pending()).toBe(1);
+      expect(
+        await engine.complete({
+          token,
+          outcome: "drafted",
+          fields: { pr_url: "u" },
+        }),
+      ).toMatchObject({ ok: true });
+      await engine.tick();
+    } finally {
+      logged.mockRestore();
+    }
+    expect(pending()).toBe(0);
+    expect(rows(r, runId)[0]?.state).toBe("completed");
+  });
+});
+
+describe("FakeAdapter.adopt", () => {
+  it("hands out later ids after the adopted one", async () => {
+    const adapter = new FakeAdapter();
+    adapter.adopt("k1", "fr_7");
+    const base = {
+      agent: "a",
+      sessionKey: "s",
+      message: "m",
+      capMs: 1,
+      tools: [],
+    };
+    expect(await adapter.startTurn({ ...base, idempotencyKey: "k1" })).toEqual({
+      runId: "fr_7",
+    });
+    expect(await adapter.startTurn({ ...base, idempotencyKey: "k2" })).toEqual({
+      runId: "fr_8",
+    });
+    adapter.adopt("k3", "fr_2");
+    adapter.adopt("k4", "harness-run");
+    expect(await adapter.startTurn({ ...base, idempotencyKey: "k5" })).toEqual({
+      runId: "fr_9",
+    });
   });
 });

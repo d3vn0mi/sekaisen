@@ -199,6 +199,8 @@ export function newAttempt(
     // The tick runs every other stage type itself, starting now.
     wakeAt: type === "agent" ? null : now,
     abortRunId: null,
+    abortAttempts: 0,
+    abortNextAt: null,
   };
 }
 

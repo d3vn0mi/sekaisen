@@ -61,6 +61,8 @@ const STAGE_RUN_COLUMNS: Record<keyof StageRunPatch, string> = {
   waitReason: "wait_reason",
   wakeAt: "wake_at",
   abortRunId: "abort_run_id",
+  abortAttempts: "abort_attempts",
+  abortNextAt: "abort_next_at",
 };
 
 const JSON_PATCH_KEYS = new Set(["fields", "runtime"]);
@@ -129,6 +131,8 @@ function stageRunFromRow(r: Row): StageRunRow {
     waitReason: r.wait_reason as string | null,
     wakeAt: r.wake_at as number | null,
     abortRunId: r.abort_run_id as string | null,
+    abortAttempts: r.abort_attempts as number,
+    abortNextAt: r.abort_next_at as number | null,
   };
 }
 
@@ -333,8 +337,9 @@ class SqliteTx implements StoreTx {
           dispatch_seq,
           deadline_at, created_at, started_at, ended_at, outcome, ending,
           fields_json, progress_note, progress_at, progress_seq, dispatched_at,
-          held_since, runtime_json, wait_reason, wake_at, abort_run_id)
-       VALUES (${placeholders(29)})`,
+          held_since, runtime_json, wait_reason, wake_at, abort_run_id,
+          abort_attempts, abort_next_at)
+       VALUES (${placeholders(31)})`,
       row.stageRunId,
       row.runId,
       row.stage,
@@ -366,6 +371,8 @@ class SqliteTx implements StoreTx {
       row.waitReason,
       row.wakeAt,
       row.abortRunId,
+      row.abortAttempts,
+      row.abortNextAt,
     );
   }
 
@@ -393,7 +400,7 @@ class SqliteTx implements StoreTx {
     inFlight?: boolean;
     wakes?: false;
     wakeBy?: number;
-    abortRequested?: true;
+    abortDueBy?: number;
     limit: number;
   }): StageRunRow[] {
     checkLimit(filter.limit);
@@ -406,16 +413,21 @@ class SqliteTx implements StoreTx {
     if (filter.inFlight === true) where.push("dispatched_at IS NOT NULL");
     if (filter.inFlight === false) where.push("dispatched_at IS NULL");
     if (filter.wakes === false) where.push("wake_at IS NULL");
-    if (filter.abortRequested) where.push("abort_run_id IS NOT NULL");
+    if (filter.abortDueBy !== undefined) {
+      where.push("abort_run_id IS NOT NULL AND abort_next_at <= ?");
+      params.push(filter.abortDueBy);
+    }
     if (filter.wakeBy !== undefined) {
       where.push("wake_at IS NOT NULL AND wake_at <= ?");
       params.push(filter.wakeBy);
     }
     const clause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
     const order =
-      filter.wakeBy === undefined
-        ? "created_at ASC, rowid ASC"
-        : "wake_at ASC, created_at ASC, rowid ASC";
+      filter.wakeBy !== undefined
+        ? "wake_at ASC, created_at ASC, rowid ASC"
+        : filter.abortDueBy !== undefined
+          ? "abort_next_at ASC, created_at ASC, rowid ASC"
+          : "created_at ASC, rowid ASC";
     return this.all(
       `SELECT * FROM stage_runs ${clause}
        ORDER BY ${order} LIMIT ?`,
@@ -439,6 +451,15 @@ class SqliteTx implements StoreTx {
       expect.attempt,
     );
     return Number(result.changes) === 1;
+  }
+
+  inFlightTurnIds(): string[] {
+    return this.all(
+      `SELECT stage_run_id FROM stage_runs
+       WHERE state = 'working' AND dispatched_at IS NOT NULL
+         AND adapter_run_id IS NOT NULL AND wake_at IS NULL
+       ORDER BY created_at ASC, rowid ASC`,
+    ).map((r) => r.stage_run_id as string);
   }
 
   findStageRunByTokenHash(hash: string): StageRunRow | undefined {
