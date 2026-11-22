@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  checkSchema,
   fieldsShorthandToSchema,
   type JsonSchema,
   SUPPORTED_KEYWORDS,
@@ -216,5 +217,119 @@ describe("fieldsShorthandToSchema", () => {
     expect(() => fieldsShorthandToSchema({ x: "date" })).toThrow(
       /unsupported field type "date"/,
     );
+  });
+});
+
+describe("checkSchema and guards", () => {
+  test("whole-schema check finds bad keywords in unvisited places", () => {
+    const bad = /unsupported JSON Schema keyword: format/;
+    expect(() =>
+      validateJson({ properties: { opt: { format: "x" } } } as JsonSchema, {}),
+    ).toThrow(/^\/properties\/opt: unsupported JSON Schema keyword: format/);
+    expect(() =>
+      validateJson({ $defs: { u: { format: "x" } } } as JsonSchema, 1),
+    ).toThrow(bad);
+    expect(() =>
+      validateJson(
+        { anyOf: [{ type: "string" }, { format: "x" }] } as JsonSchema,
+        "s",
+      ),
+    ).toThrow(bad);
+    expect(() => validateJson({ type: ["string", "bogus"] }, "s")).toThrow(
+      /\/type: unsupported JSON Schema type: bogus/,
+    );
+  });
+
+  test("malformed schemas throw clean pointer errors", () => {
+    const cases: [unknown, RegExp][] = [
+      [true, /^: must be a schema object/],
+      [
+        { properties: { a: null } },
+        /^\/properties\/a: must be a schema object/,
+      ],
+      [{ required: 3 }, /^\/required: must be an array of strings/],
+      [{ required: "ab" }, /^\/required: must be an array of strings/],
+      [{ enum: "x" }, /^\/enum: must be an array/],
+      [{ minLength: "3" }, /^\/minLength: must be a non-negative integer/],
+      [{ maxItems: -1 }, /^\/maxItems: must be a non-negative integer/],
+      [{ minimum: "1" }, /^\/minimum: must be a number/],
+      [{ properties: [] }, /^\/properties: must be an object of schemas/],
+      [{ $defs: 1 }, /^\/\$defs: must be an object of schemas/],
+      [{ items: [{ type: "string" }] }, /^\/items: must be a schema/],
+      [{ oneOf: {} }, /^\/oneOf: must be an array of schemas/],
+      [{ $ref: "#/$defs/nope" }, /^\/\$ref: unresolved \$ref/],
+    ];
+    for (const [schema, re] of cases) {
+      expect(() => checkSchema(schema as JsonSchema)).toThrow(re);
+    }
+  });
+
+  test("patterns use ECMA semantics and are compiled once", () => {
+    expect(validateJson({ pattern: "a{" }, "a{")).toEqual([]);
+    expect(validateJson({ pattern: "\\_" }, "_")).toEqual([]);
+    expect(() => checkSchema({ pattern: "(" })).toThrow(
+      /^\/pattern: invalid pattern: /,
+    );
+  });
+
+  test("nested quantifiers are refused", () => {
+    for (const p of ["^(a+)+$", "(a*)*", "(a|b+)*", "(?:x+){2,}"]) {
+      expect(() => checkSchema({ pattern: p })).toThrow(
+        "/pattern: pattern has nested quantifiers",
+      );
+    }
+    for (const p of ["^(ab)+$", "^[a+]+$", "a+b*", "^(a|b)*c+$", "\\(a+\\)+"]) {
+      expect(() => checkSchema({ pattern: p })).not.toThrow();
+    }
+    const start = Date.now();
+    expect(() =>
+      validateJson({ pattern: "^(a+)+$" }, `${"a".repeat(40)}!`),
+    ).toThrow();
+    expect(Date.now() - start).toBeLessThan(1000);
+  });
+
+  test("a $ref cycle that makes no progress throws", () => {
+    const schema: JsonSchema = {
+      $defs: { a: { $ref: "#/$defs/b" }, b: { $ref: "#/$defs/a" } },
+      $ref: "#/$defs/a",
+    };
+    expect(() => validateJson(schema, 1)).toThrow(
+      /: \$ref cycle at #\/\$defs\/a/,
+    );
+  });
+
+  test("a recursive schema that consumes the value is fine", () => {
+    const schema: JsonSchema = {
+      $defs: {
+        node: {
+          type: "object",
+          properties: {
+            kids: { type: "array", items: { $ref: "#/$defs/node" } },
+          },
+          additionalProperties: false,
+        },
+      },
+      $ref: "#/$defs/node",
+    };
+    expect(
+      validateJson(schema, { kids: [{ kids: [{}] }, { kids: [{ x: 1 }] }] }),
+    ).toEqual(["/kids/1/kids/0/x: unexpected property"]);
+  });
+
+  test("nesting deeper than 64 throws", () => {
+    const schema: JsonSchema = {
+      $defs: {
+        n: { type: "object", properties: { c: { $ref: "#/$defs/n" } } },
+      },
+      $ref: "#/$defs/n",
+    };
+    let v: Record<string, unknown> = {};
+    for (let i = 0; i < 100; i++) v = { c: v };
+    expect(() => validateJson(schema, v)).toThrow(
+      /schema nesting deeper than 64/,
+    );
+    let s: JsonSchema = { type: "string" };
+    for (let i = 0; i < 70; i++) s = { items: s };
+    expect(() => checkSchema(s)).toThrow(/schema nesting deeper than 64/);
   });
 });
