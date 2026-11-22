@@ -201,6 +201,8 @@ export function newAttempt(
     abortRunId: null,
     abortAttempts: 0,
     abortNextAt: null,
+    observedAt: null,
+    startError: null,
   };
 }
 

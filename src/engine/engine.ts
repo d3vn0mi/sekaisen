@@ -8,6 +8,12 @@ import { validateJson } from "../format/jsonschema.js";
 import type { LoadedDefinition } from "../format/load.js";
 import type { AgentStage } from "../format/types.js";
 import type { HostRegistry } from "../host/registry.js";
+import {
+  type AgentSlot,
+  admit,
+  isPause,
+  pauseReason,
+} from "../scheduler/scheduler.js";
 import type {
   GateRow,
   RunRow,
@@ -27,7 +33,7 @@ import {
   type RunCtx,
 } from "./advance.js";
 import { outcomesList, renderBrief, renderContinuation } from "./brief.js";
-import { realTimers, type Timers, withTimeout } from "./calls.js";
+import { eachLimit, realTimers, type Timers, withTimeout } from "./calls.js";
 import { cancelRun } from "./cancel.js";
 import { type Clock, systemClock } from "./clock.js";
 import {
@@ -51,22 +57,24 @@ import { invoke, rejectStageRun, stageFields } from "./hostcalls.js";
 import { newRunId } from "./ids.js";
 import { deadlinePassed } from "./lifecycle.js";
 import { type Pinned, PinnedDefinitions } from "./pinned.js";
+import { sessionKeyOf } from "./sessions.js";
 import { recordCallError, recordCallResult, stepStage } from "./stages.js";
 import { deriveToken, hashToken, MIN_TOKEN_SECRET_BYTES } from "./tokens.js";
 import {
   type AbortRequest,
   abortRequest,
-  admission,
   failAbort,
   forgetTurn,
   logAbort,
+  recordAdmit,
   recordLost,
   recordTimeout,
   recordTurnEnd,
+  recordWait,
   settleAbort,
   type TxCtx,
 } from "./turns.js";
-import { descend, errorMessage, isPlainObject } from "./values.js";
+import { errorMessage, isPlainObject } from "./values.js";
 
 export type { Timers } from "./calls.js";
 export {
@@ -119,6 +127,16 @@ export interface EngineOptions {
   adapterCallTimeoutMs?: number;
   /** The timers behind `adapterCallTimeoutMs`; real ones by default. */
   timers?: Timers;
+  /**
+   * Most working stage runs an agent may have on one session key, by agent;
+   * 1 for an agent not named. Further stage runs wait as `wip:<agent>`.
+   */
+  wip?: Record<string, number>;
+  /**
+   * Most turns the tick reads, and host functions it calls, at the same
+   * time; 4 by default. Each is still bounded by `adapterCallTimeoutMs`.
+   */
+  concurrency?: number;
 }
 
 export interface RunStatusView {
@@ -134,7 +152,14 @@ export const COMPLETION_TOOLS = ["stage_complete", "stage_progress"];
 
 const DEFAULT_TICK_MS = 5000;
 const DEFAULT_CALL_TIMEOUT_MS = 30_000;
+const DEFAULT_WIP = 1;
+const DEFAULT_CONCURRENCY = 4;
 const TICK_BATCH = 100;
+/**
+ * Pages of `TICK_BATCH` submitted stage runs one agent pass may look at, so
+ * a deep queue of refused ones at the head cannot hide one that could run.
+ */
+const MAX_CANDIDATE_PAGES = 10;
 /**
  * How long, on the engine's clock, a tick goes on starting abort calls once
  * its other work is done; the rest wait for the next tick.
@@ -168,6 +193,7 @@ export class Engine {
   private readonly tokenSecret: Uint8Array;
   private readonly callTimeoutMs: number;
   private readonly timers: Timers;
+  private readonly concurrency: number;
   private caps?: Promise<Capabilities>;
   /**
    * Stage runs whose turn was in flight when the engine started and that
@@ -193,6 +219,15 @@ export class Engine {
     this.timers = o.timers ?? realTimers;
     if (!(Number.isFinite(this.callTimeoutMs) && this.callTimeoutMs > 0)) {
       throw new Error("adapterCallTimeoutMs must be a positive number");
+    }
+    this.concurrency = o.concurrency ?? DEFAULT_CONCURRENCY;
+    if (!isPositiveInteger(this.concurrency)) {
+      throw new Error("concurrency must be a positive integer");
+    }
+    for (const [agent, n] of Object.entries(o.wip ?? {})) {
+      if (!isPositiveInteger(n)) {
+        throw new Error(`wip for ${agent} must be a positive integer`);
+      }
     }
     if (
       o.tokenSecret !== undefined &&
@@ -521,18 +556,18 @@ export class Engine {
     } catch (err) {
       this.report(err);
     }
-    for (const id of ids) {
+    await eachLimit(ids, this.concurrency, async (id) => {
       try {
         const row = this.store.tx((t) => t.getStageRun(id));
         if (row?.state !== "working") {
           this.unreconciled.delete(id);
-          continue;
+          return;
         }
         await this.observe(row, caps);
       } catch (err) {
         this.report(err);
       }
-    }
+    });
     if (caps) await this.flushAborts(caps);
   }
 
@@ -564,35 +599,35 @@ export class Engine {
       this.report(err);
     }
     // Turns first, so a continuation or retry they submit is dispatched in
-    // the same pass.
-    const inFlight = this.store.tx((t) =>
-      t.listStageRuns({ inFlight: true, limit: TICK_BATCH }),
-    );
-    for (const row of inFlight) {
+    // the same pass. The least recently observed are taken, and marked, so
+    // every turn in flight is read in turn however many there are.
+    const inFlight = this.store.tx((t) => {
+      const now = this.clock.now();
+      const rows = t.listStageRuns({ inFlight: true, limit: TICK_BATCH });
+      for (const row of rows) {
+        t.updateStageRunIf(
+          row.stageRunId,
+          { state: row.state, attempt: row.attempt },
+          { observedAt: now },
+        );
+      }
+      return rows;
+    });
+    await eachLimit(inFlight, this.concurrency, async (row) => {
       try {
         await this.observe(row, caps);
       } catch (err) {
         // One broken stage run must not hold up the others.
         this.report(err);
       }
-    }
+    });
     // The stages the tick runs itself need nothing from the harness.
     await this.runStages();
     if (!caps) return;
-    // Agent stage runs only: every other stage type has a wake time.
-    const submitted = this.store.tx((t) =>
-      t.listStageRuns({
-        state: ["submitted"],
-        wakes: false,
-        limit: TICK_BATCH,
-      }),
-    );
-    for (const row of submitted) {
-      try {
-        await this.admit(row, caps);
-      } catch (err) {
-        this.report(err);
-      }
+    try {
+      await this.schedule(caps);
+    } catch (err) {
+      this.report(err);
     }
     // Last, so a harness slow to abort cannot hold up the work above.
     await this.flushAborts(caps);
@@ -610,13 +645,13 @@ export class Engine {
         limit: TICK_BATCH,
       }),
     );
-    for (const row of due) {
+    await eachLimit(due, this.concurrency, async (row) => {
       try {
         await this.runStage(row);
       } catch (err) {
         this.report(err);
       }
-    }
+    });
   }
 
   /** One due stage run: prepare in a transaction, call the host, record in another. */
@@ -804,19 +839,115 @@ export class Engine {
   }
 
   /**
-   * A submitted stage run: held by a pause (which keeps its deadline from
-   * running), else timed out, else dispatched.
+   * The agent pass: the submitted agent stage runs that may start a turn, in
+   * admission order, as the scheduler decides. One whose deadline passed
+   * while no pause held it times out first and takes no lane. A refused one
+   * records why it waits (a pause also holds its deadline); an admitted one
+   * is dispatched, one at a time.
    */
-  private async admit(seen: StageRunRow, caps: Capabilities): Promise<void> {
-    const found = this.commit((t, emit) =>
-      admission({ ...this.txCtx(t, emit), caps }, seen),
-    );
-    if (!found || "held" in found) return;
-    if (deadlinePassed(found.row, this.clock.now())) {
-      await this.timeOut(found.row, caps);
-      return;
+  private async schedule(caps: Capabilities): Promise<void> {
+    const now = this.clock.now();
+    const plan = this.store.tx((t) => {
+      const working = t.listWorking();
+      const limits = t.listLimits(now);
+      const runs = new Map<string, RunRow>();
+      const slots = new Map<string, AgentSlot>();
+      const describe = (row: StageRunRow): AgentSlot | undefined => {
+        if (slots.has(row.stageRunId)) return slots.get(row.stageRunId);
+        const run = runs.get(row.runId) ?? t.getRun(row.runId);
+        if (!run) return undefined;
+        runs.set(run.runId, run);
+        const pinned = this.pinned.of(t, run);
+        const stage = pinned.def.stages[row.stage];
+        if (stage?.type !== "agent") return undefined;
+        const slot = {
+          agent: stage.agent,
+          sessionKey: sessionKeyOf(run, stage),
+          providers: pinned.def.providers,
+        };
+        slots.set(row.stageRunId, slot);
+        return slot;
+      };
+      const free =
+        caps.maxConcurrent - working.filter((row) => describe(row)).length;
+      const stageOf = (row: StageRunRow) => slots.get(row.stageRunId);
+      const ctx = {
+        working,
+        limits,
+        capabilities: caps,
+        wip: (agent: string) => this.wipOf(agent),
+        runs,
+        now,
+        stageOf,
+      };
+      const expired: StageRunRow[] = [];
+      const open: StageRunRow[] = [];
+      // Page on while lanes are free and refused stage runs fill the page:
+      // the store's order is the scheduler's, so a later page never changes
+      // what an earlier one decided.
+      let decision = admit(open, ctx);
+      for (let page = 0; page < MAX_CANDIDATE_PAGES; page++) {
+        const rows = t.listDispatchable(TICK_BATCH, page * TICK_BATCH);
+        for (const row of rows) {
+          const slot = describe(row);
+          const due =
+            slot !== undefined &&
+            deadlinePassed(row, now) &&
+            pauseReason(row, slot.providers, limits, caps, now) === undefined;
+          (due ? expired : open).push(row);
+        }
+        decision = admit(open, ctx);
+        if (rows.length < TICK_BATCH || decision.admit.length >= free) break;
+        if (page === MAX_CANDIDATE_PAGES - 1) {
+          this.report(
+            `more than ${MAX_CANDIDATE_PAGES * TICK_BATCH} stage runs wait for dispatch; the rest wait for a later tick`,
+          );
+        }
+      }
+      const byId = new Map(open.map((row) => [row.stageRunId, row]));
+      const waiting = decision.waiting.flatMap(({ id, reason }) => {
+        const row = byId.get(id);
+        return row ? [{ row, reason }] : [];
+      });
+      const admitted = decision.admit.flatMap((id) => byId.get(id) ?? []);
+      return { expired, waiting, admitted };
+    });
+    for (const row of plan.expired) {
+      try {
+        await this.timeOut(row, caps);
+      } catch (err) {
+        this.report(err);
+      }
     }
-    await this.dispatch(found.row.stageRunId, caps);
+    this.commit((t, emit) => {
+      const c = this.txCtx(t, emit);
+      for (const { row, reason } of plan.waiting) {
+        recordWait(c, row, reason, isPause(reason));
+      }
+    });
+    for (const seen of plan.admitted) {
+      try {
+        const row = this.commit((t, emit) =>
+          recordAdmit(this.txCtx(t, emit), seen),
+        );
+        if (!row) continue;
+        if (deadlinePassed(row, this.clock.now())) {
+          await this.timeOut(row, caps);
+          continue;
+        }
+        await this.dispatch(row.stageRunId, caps);
+      } catch (err) {
+        this.report(err);
+      }
+    }
+  }
+
+  /** Most working stage runs `agent` may have on one session key. */
+  private wipOf(agent: string): number {
+    const wip = this.o.wip;
+    return wip && Object.hasOwn(wip, agent)
+      ? (wip[agent] ?? DEFAULT_WIP)
+      : DEFAULT_WIP;
   }
 
   /**
@@ -850,10 +981,18 @@ export class Engine {
       ));
     } catch (err) {
       // The row keeps its dispatch sequence; the next tick resends the same
-      // message under the same key.
+      // message under the same key. A failure is logged once, and again only
+      // when its error changes, so a harness down for hours does not grow
+      // the log every tick.
+      const error = errorMessage(err);
       this.store.tx((t) => {
         const row = t.getStageRun(stageRunId);
-        if (!row) return;
+        if (!row || row.startError === error) return;
+        t.updateStageRunIf(
+          stageRunId,
+          { state: row.state, attempt: row.attempt },
+          { startError: error },
+        );
         t.appendTransition({
           runId: row.runId,
           stageRunId,
@@ -863,7 +1002,7 @@ export class Engine {
           outcome: null,
           actor: ENGINE_ACTOR,
           at: this.clock.now(),
-          detail: { dispatchSeq: prep.dispatchSeq, error: errorMessage(err) },
+          detail: { dispatchSeq: prep.dispatchSeq, error },
         });
       });
       return;
@@ -891,7 +1030,7 @@ export class Engine {
     // Other stage types are not run by this engine version.
     if (stage?.type !== "agent") return undefined;
 
-    const sessionKey = this.sessionKey(run, stage);
+    const sessionKey = sessionKeyOf(run, stage);
     // A dispatch recorded but whose turn was never recorded is resent under
     // the same key, so a harness that did accept it does not start it twice.
     // The token is derived from the attempt, so the resent message is the
@@ -998,6 +1137,7 @@ export class Engine {
           startedAt: row.startedAt ?? now,
           dispatchedAt: now,
           waitReason: null,
+          startError: null,
           deadlineAt:
             row.deadlineAt ?? (deadline === undefined ? null : now + deadline),
         },
@@ -1093,18 +1233,6 @@ export class Engine {
     }
   }
 
-  private sessionKey(run: RunRow, stage: AgentStage): string {
-    if (stage.session === "project") {
-      const project = descend(run.inputs, "project");
-      const scope =
-        typeof project === "string" || typeof project === "number"
-          ? String(project)
-          : run.runId;
-      return `project:${scope}:${stage.agent}`;
-    }
-    return `run:${run.runId}:${stage.agent}`;
-  }
-
   // --- plumbing -----------------------------------------------------------
 
   private txCtx(t: StoreTx, emit: EmitFn, actor?: string): TxCtx {
@@ -1134,4 +1262,8 @@ export class Engine {
   private report(err: unknown): void {
     console.error(`sekaisen: ${errorMessage(err)}`);
   }
+}
+
+function isPositiveInteger(n: unknown): boolean {
+  return typeof n === "number" && Number.isInteger(n) && n > 0;
 }

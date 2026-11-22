@@ -501,3 +501,49 @@ describe("the tick", () => {
     expect(runOf(r, runId).status).toBe("completed");
   });
 });
+
+describe("the stages pass at scale", () => {
+  it("calls host functions at most `concurrency` at a time", async () => {
+    let open = 0;
+    let most = 0;
+    const waiting: Array<() => void> = [];
+    const r = await flow(
+      {
+        c: {
+          type: "check",
+          check: "demo.ready",
+          outcomes: { yes: "done" },
+        },
+      },
+      (reg) =>
+        reg.checks.set("demo.ready", () => {
+          open += 1;
+          most = Math.max(most, open);
+          return new Promise<string>((resolve) =>
+            waiting.push(() => {
+              open -= 1;
+              resolve("yes");
+            }),
+          );
+        }),
+      { concurrency: 2 },
+    );
+    const runs: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      runs.push((await r.engine.startRun("flow", {})).runId);
+    }
+    let done = false;
+    const tick = r.engine.tick().finally(() => {
+      done = true;
+    });
+    while (!done) {
+      await new Promise((res) => setImmediate(res));
+      waiting.shift()?.();
+    }
+    await tick;
+    expect(most).toBe(2);
+    expect(runs.map((id) => runOf(r, id).status)).toEqual(
+      new Array(5).fill("completed"),
+    );
+  });
+});

@@ -1,6 +1,5 @@
 import type { Capabilities } from "../adapter/types.js";
 import type { ProviderPolicy } from "../format/types.js";
-import type { LimitRow, StageRunRow } from "../store/types.js";
 
 /**
  * Two kinds of pause share the `limits` table:
@@ -16,8 +15,6 @@ export const PROVIDER_SCOPE = "provider";
 export const POLICY_SCOPE = "policy";
 /** The provider name used when neither the turn nor the harness gives one. */
 export const DEFAULT_PROVIDER = "default";
-
-const PAUSED_PROVIDER = "paused:provider:";
 
 /** The wait reason of a stage run held by a limit of `scope` and `key`. */
 export const pausedReason = (scope: string, key: string): string =>
@@ -68,40 +65,4 @@ export function degradedPolicy(
   if (provider === undefined || allowed === undefined) return undefined;
   if (allowed.length === 0 || allowed.includes(provider)) return undefined;
   return policyKey(allowed);
-}
-
-/**
- * Why `row` must not be dispatched yet, or undefined when no pause holds it.
- * This is the only place dispatch reads limits.
- *
- * - A `fleet` row is held by any provider limit (a refusal means the whole
- *   fallback chain failed) and never by a policy limit.
- * - A `subscription` or `allow` row is held by a provider limit on any
- *   provider in its allowed set, by the limit of its own policy key, and by
- *   the provider a refusal of its own named.
- */
-export function providerPause(
-  row: StageRunRow,
-  policy: ProviderPolicy,
-  limits: readonly LimitRow[],
-  caps: Capabilities,
-): string | undefined {
-  const allowed = allowedSet(policy, caps);
-  const own = row.waitReason?.startsWith(PAUSED_PROVIDER)
-    ? row.waitReason.slice(PAUSED_PROVIDER.length)
-    : undefined;
-  for (const l of limits) {
-    if (l.scope === PROVIDER_SCOPE) {
-      if (allowed === undefined || allowed.includes(l.key) || l.key === own) {
-        return pausedReason(PROVIDER_SCOPE, l.key);
-      }
-    } else if (
-      l.scope === POLICY_SCOPE &&
-      allowed !== undefined &&
-      l.key === policyKey(allowed)
-    ) {
-      return pausedReason(POLICY_SCOPE, l.key);
-    }
-  }
-  return undefined;
 }

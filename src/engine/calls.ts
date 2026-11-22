@@ -56,3 +56,23 @@ export function withTimeout<T>(
     );
   });
 }
+
+/**
+ * Runs `fn` over `items` with at most `limit` calls in flight, starting them
+ * in order. `fn` handles its own errors; one that throws rejects the whole.
+ */
+export async function eachLimit<T>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const item = items[next++] as T;
+      await fn(item);
+    }
+  };
+  const n = Math.min(limit, items.length);
+  await Promise.all(Array.from({ length: n }, worker));
+}

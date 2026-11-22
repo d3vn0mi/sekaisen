@@ -165,10 +165,10 @@ describe("dispatch", () => {
     await engine.startRun("review-loop", { topic: "t", project: "site" });
     const { runId } = await engine.startRun("review-loop", { topic: "t" });
     await engine.tick();
-    expect(adapter.calls.map((c) => c.sessionKey)).toEqual([
-      "project:site:drafter",
-      `project:${runId}:drafter`,
-    ]);
+    // Started in the same millisecond, so admitted in stage run id order.
+    expect(adapter.calls.map((c) => c.sessionKey).sort()).toEqual(
+      ["project:site:drafter", `project:${runId}:drafter`].sort(),
+    );
   });
 
   it("a refused startTurn is retried with the same key and message", async () => {
@@ -641,5 +641,113 @@ describe("dispatch edge cases", () => {
     expect(row?.state).toBe("completed");
     expect(row?.adapterRunId).toBe("fr_1");
     expect(row?.startedAt).toBe(clock.now());
+  });
+});
+
+describe("the tick at scale", () => {
+  const events = (store: Store, runId: string, event: string) =>
+    store.tx((t) => t.transitions(runId).filter((x) => x.event === event));
+
+  it("logs a failed turn start once, and again only when its error changes", async () => {
+    const { engine, adapter, store } = await make();
+    const { runId } = await engine.startRun("review-loop", { topic: "rust" });
+    let error = "harness down";
+    adapter.beforeStart = () => {
+      throw new Error(error);
+    };
+    await engine.tick();
+    await engine.tick();
+    await engine.tick();
+    expect(adapter.calls).toHaveLength(3);
+    expect(events(store, runId, "turn_start_failed")).toHaveLength(1);
+    expect(engine.status(runId).live?.startError).toBe("harness down");
+    error = "harness overloaded";
+    await engine.tick();
+    await engine.tick();
+    const logged = events(store, runId, "turn_start_failed");
+    expect(logged.map((x) => (x.detail as { error: string }).error)).toEqual([
+      "harness down",
+      "harness overloaded",
+    ]);
+    adapter.beforeStart = undefined;
+    await engine.tick();
+    expect(engine.status(runId).live?.state).toBe("working");
+    expect(engine.status(runId).live?.startError).toBeNull();
+  });
+
+  it("dispatches higher-priority runs first; startRun can override the priority", async () => {
+    const { engine, adapter, clock } = await make();
+    adapter.caps = { ...adapter.caps, maxConcurrent: 1 };
+    await engine.startRun("review-loop", { topic: "old" });
+    clock.advance(1000);
+    const urgent = await engine.startRun(
+      "review-loop",
+      { topic: "new" },
+      { priority: 5 },
+    );
+    await engine.tick();
+    expect(adapter.calls).toHaveLength(1);
+    expect(adapter.calls[0]?.idempotencyKey).toBe(`${urgent.runId}:draft:1`);
+  });
+
+  it("reads turns in flight at most `concurrency` at a time", async () => {
+    const { engine, adapter } = await make({ concurrency: 3 });
+    for (let i = 0; i < 7; i++) {
+      await engine.startRun("review-loop", { topic: `t${i}` });
+    }
+    await engine.tick();
+    expect(adapter.calls).toHaveLength(7);
+    let open = 0;
+    let most = 0;
+    const waiting: Array<() => void> = [];
+    adapter.beforeRead = () => {
+      open += 1;
+      most = Math.max(most, open);
+      return new Promise<void>((resolve) =>
+        waiting.push(() => {
+          open -= 1;
+          resolve();
+        }),
+      );
+    };
+    let done = false;
+    const tick = engine.tick().finally(() => {
+      done = true;
+    });
+    while (!done) {
+      await new Promise((r) => setImmediate(r));
+      waiting.shift()?.();
+    }
+    await tick;
+    expect(most).toBe(3);
+  });
+
+  it("reads the least recently observed turns first, so none is left unread", async () => {
+    const { engine, adapter, store, clock } = await make();
+    adapter.caps = { ...adapter.caps, maxConcurrent: 200 };
+    for (let i = 0; i < 150; i++) {
+      await engine.startRun("review-loop", { topic: `t${i}` });
+    }
+    // A tick dispatches at most 100; the second also reads the first 100.
+    await engine.tick();
+    clock.advance(1000);
+    await engine.tick();
+    expect(adapter.calls).toHaveLength(150);
+    const read = new Set<string>();
+    adapter.beforeRead = (id) => {
+      read.add(id);
+    };
+    clock.advance(1000);
+    await engine.tick();
+    expect(read.size).toBe(100);
+    clock.advance(1000);
+    await engine.tick();
+    expect(read.size).toBe(150);
+    const unobserved = store.tx((t) =>
+      t
+        .listStageRuns({ inFlight: true, limit: 500 })
+        .filter((s) => s.observedAt === null),
+    );
+    expect(unobserved).toEqual([]);
   });
 });

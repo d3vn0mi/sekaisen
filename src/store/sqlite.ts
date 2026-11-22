@@ -63,6 +63,8 @@ const STAGE_RUN_COLUMNS: Record<keyof StageRunPatch, string> = {
   abortRunId: "abort_run_id",
   abortAttempts: "abort_attempts",
   abortNextAt: "abort_next_at",
+  observedAt: "observed_at",
+  startError: "start_error",
 };
 
 const JSON_PATCH_KEYS = new Set(["fields", "runtime"]);
@@ -133,6 +135,8 @@ function stageRunFromRow(r: Row): StageRunRow {
     abortRunId: r.abort_run_id as string | null,
     abortAttempts: r.abort_attempts as number,
     abortNextAt: r.abort_next_at as number | null,
+    observedAt: r.observed_at as number | null,
+    startError: r.start_error as string | null,
   };
 }
 
@@ -338,8 +342,8 @@ class SqliteTx implements StoreTx {
           deadline_at, created_at, started_at, ended_at, outcome, ending,
           fields_json, progress_note, progress_at, progress_seq, dispatched_at,
           held_since, runtime_json, wait_reason, wake_at, abort_run_id,
-          abort_attempts, abort_next_at)
-       VALUES (${placeholders(31)})`,
+          abort_attempts, abort_next_at, observed_at, start_error)
+       VALUES (${placeholders(33)})`,
       row.stageRunId,
       row.runId,
       row.stage,
@@ -373,6 +377,8 @@ class SqliteTx implements StoreTx {
       row.abortRunId,
       row.abortAttempts,
       row.abortNextAt,
+      row.observedAt,
+      row.startError,
     );
   }
 
@@ -427,7 +433,9 @@ class SqliteTx implements StoreTx {
         ? "wake_at ASC, created_at ASC, rowid ASC"
         : filter.abortDueBy !== undefined
           ? "abort_next_at ASC, created_at ASC, rowid ASC"
-          : "created_at ASC, rowid ASC";
+          : filter.inFlight === true
+            ? "observed_at ASC, created_at ASC, rowid ASC"
+            : "created_at ASC, rowid ASC";
     return this.all(
       `SELECT * FROM stage_runs ${clause}
        ORDER BY ${order} LIMIT ?`,
@@ -451,6 +459,30 @@ class SqliteTx implements StoreTx {
       expect.attempt,
     );
     return Number(result.changes) === 1;
+  }
+
+  listDispatchable(limit: number, offset = 0): StageRunRow[] {
+    checkLimit(limit);
+    if (!Number.isInteger(offset) || offset < 0) {
+      throw new Error("offset must be a non-negative integer");
+    }
+    return this.all(
+      `SELECT s.* FROM stage_runs s JOIN runs r ON r.run_id = s.run_id
+       WHERE s.state = 'submitted' AND s.wake_at IS NULL
+         AND r.status = 'working'
+       ORDER BY r.priority DESC, s.created_at ASC, s.stage_run_id ASC
+       LIMIT ? OFFSET ?`,
+      limit,
+      offset,
+    ).map(stageRunFromRow);
+  }
+
+  listWorking(): StageRunRow[] {
+    return this.all(
+      `SELECT * FROM stage_runs
+       WHERE state = 'working' AND wake_at IS NULL
+       ORDER BY created_at ASC, rowid ASC`,
+    ).map(stageRunFromRow);
   }
 
   inFlightTurnIds(): string[] {

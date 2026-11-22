@@ -66,12 +66,14 @@ export const MIGRATIONS: readonly string[] = [
     wake_at         INTEGER,
     abort_run_id    TEXT,
     abort_attempts  INTEGER NOT NULL DEFAULT 0,
-    abort_next_at   INTEGER
+    abort_next_at   INTEGER,
+    observed_at     INTEGER,
+    start_error     TEXT
   );
   CREATE INDEX stage_runs_state ON stage_runs (state);
   CREATE INDEX stage_runs_token_hash ON stage_runs (token_hash);
   CREATE INDEX stage_runs_run ON stage_runs (run_id, stage);
-  CREATE INDEX stage_runs_in_flight ON stage_runs (dispatched_at)
+  CREATE INDEX stage_runs_in_flight ON stage_runs (observed_at, created_at)
     WHERE dispatched_at IS NOT NULL;
   CREATE INDEX stage_runs_wake ON stage_runs (wake_at)
     WHERE wake_at IS NOT NULL;

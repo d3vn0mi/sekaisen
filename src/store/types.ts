@@ -117,6 +117,17 @@ export interface StageRunRow {
   abortAttempts: number;
   /** When the abort of `abortRunId` is next asked for; null when none is pending. */
   abortNextAt: number | null;
+  /**
+   * When the tick last took this stage run's turn up to read; null when it
+   * never has. Turns in flight are read least recently observed first, so
+   * every one of them is read in turn however many there are.
+   */
+  observedAt: number | null;
+  /**
+   * The error of the last failed attempt to start this stage run's turn;
+   * null once a turn starts. A repeat of the same error is not logged again.
+   */
+  startError: string | null;
 }
 
 export interface TransitionRow {
@@ -222,7 +233,8 @@ export interface StoreTx {
   /** The newest stage run of the run that is submitted, working or input_required. */
   liveStageRun(runId: string): StageRunRow | undefined;
   /**
-   * Oldest first. `inFlight` keeps only stage runs with a turn in flight.
+   * Oldest first. `inFlight` keeps only stage runs with a turn in flight,
+   * least recently observed first (never observed before any).
    * `wakes: false` keeps only stage runs without a wake time (agent stages).
    * `wakeBy` keeps only stage runs whose wake time is at or before it, and
    * orders them by wake time, earliest first. `abortDueBy` keeps only stage
@@ -244,6 +256,17 @@ export interface StoreTx {
     patch: StageRunPatch,
   ): boolean;
   findStageRunByTokenHash(hash: string): StageRunRow | undefined;
+  /**
+   * Submitted stage runs without a wake time (agent stages) of working runs,
+   * in admission order: higher run priority first, then oldest first, then
+   * by stage run id. `offset` skips that many, for the next page.
+   */
+  listDispatchable(limit: number, offset?: number): StageRunRow[];
+  /**
+   * Every working stage run without a wake time (agent stages), oldest
+   * first. Unbounded, so a count of the turns taking a lane is never short.
+   */
+  listWorking(): StageRunRow[];
   /**
    * Every working agent stage run with a harness turn in flight, by id,
    * oldest first. Ids only and unbounded, so a restart sees all of them.

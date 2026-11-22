@@ -61,6 +61,8 @@ const stageRun = (over: Partial<NewStageRun> = {}): NewStageRun => ({
   abortRunId: null,
   abortAttempts: 0,
   abortNextAt: null,
+  observedAt: null,
+  startError: null,
   ...over,
 });
 
@@ -726,6 +728,78 @@ describe("wake times", () => {
       expect(ids(t.listStageRuns({ wakeBy: 100, limit: 10 }))).toEqual([
         "late",
         "later",
+      ]);
+    });
+  });
+});
+
+describe("scheduler queries", () => {
+  const ids = (rows: StageRunRow[]) => rows.map((r) => r.stageRunId);
+
+  it("lists dispatchable stage runs by run priority, then age, then id", () => {
+    const store = open();
+    store.tx((t) => {
+      seed(t, { runId: "low", priority: 0 });
+      t.insertRun(run({ runId: "high", priority: 5 }));
+      t.insertRun(run({ runId: "done", priority: 9, status: "completed" }));
+      const add = (id: string, runId: string, createdAt: number, over = {}) =>
+        t.insertStageRun(
+          stageRun({ stageRunId: id, runId, stage: id, createdAt, ...over }),
+        );
+      add("old", "low", 1);
+      add("hb", "high", 30);
+      add("ha", "high", 30);
+      add("h0", "high", 40);
+      add("ended", "done", 1);
+      add("waits", "high", 1, { wakeAt: 5 });
+      add("busy", "high", 1, { state: "working" });
+      expect(ids(t.listDispatchable(10))).toEqual(["ha", "hb", "h0", "old"]);
+      expect(ids(t.listDispatchable(2))).toEqual(["ha", "hb"]);
+      expect(ids(t.listDispatchable(2, 2))).toEqual(["h0", "old"]);
+      expect(() => t.listDispatchable(2, -1)).toThrow(
+        "offset must be a non-negative integer",
+      );
+      expect(() => t.listDispatchable(0)).toThrow(
+        "limit must be a positive integer",
+      );
+    });
+  });
+
+  it("lists every working stage run without a wake time", () => {
+    const store = open();
+    store.tx((t) => {
+      seed(t);
+      const add = (id: string, over: Partial<NewStageRun>) =>
+        t.insertStageRun(stageRun({ stageRunId: id, stage: id, ...over }));
+      add("a", { state: "working", createdAt: 2 });
+      add("b", { state: "working", createdAt: 1 });
+      add("poll", { state: "working", wakeAt: 9 });
+      add("queued", { state: "submitted" });
+      expect(ids(t.listWorking())).toEqual(["b", "a"]);
+    });
+  });
+
+  it("lists turns in flight least recently observed first", () => {
+    const store = open();
+    store.tx((t) => {
+      seed(t);
+      const add = (id: string, over: Partial<NewStageRun>) =>
+        t.insertStageRun(
+          stageRun({
+            stageRunId: id,
+            stage: id,
+            state: "working",
+            dispatchedAt: 1,
+            ...over,
+          }),
+        );
+      add("seen", { createdAt: 1, observedAt: 50 });
+      add("never", { createdAt: 3 });
+      add("stale", { createdAt: 2, observedAt: 10 });
+      expect(ids(t.listStageRuns({ inFlight: true, limit: 10 }))).toEqual([
+        "never",
+        "stale",
+        "seen",
       ]);
     });
   });

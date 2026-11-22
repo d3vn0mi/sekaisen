@@ -22,7 +22,6 @@ import {
   degradedPolicy,
   POLICY_SCOPE,
   PROVIDER_SCOPE,
-  providerPause,
   refusedProvider,
 } from "./providers.js";
 import { clip } from "./values.js";
@@ -303,44 +302,72 @@ export function forgetTurn(c: TxCtx, seen: StageRunRow): void {
 }
 
 /**
- * Whether a submitted agent stage run is held by a pause. A newly held row
- * records `heldSince` with the reason; a row released from a hold has its
- * deadline moved by the time it was held. Returns the row as it now is.
+ * Records why a submitted stage run the scheduler refused waits. A pause
+ * holds it: `heldSince` is set so its deadline does not run down. Any other
+ * reason (WIP, lane) releases a hold, moving the deadline by the time held.
+ * Writes nothing when nothing changed.
  */
-export function admission(
-  c: TickCtx,
+export function recordWait(
+  c: TxCtx,
   seen: StageRunRow,
-): { held: string } | { row: StageRunRow } | undefined {
-  const row = c.t.getStageRun(seen.stageRunId);
-  if (row?.state !== "submitted") return undefined;
-  const run = c.t.getRun(row.runId);
-  if (run?.status !== "working") return undefined;
-  const def = c.pinned.of(c.t, run).def;
-  const expect = { state: "submitted" as const, attempt: row.attempt };
-  if (def.stages[row.stage]?.type !== "agent") return undefined;
-  const reason = providerPause(
-    row,
-    def.providers,
-    c.t.listLimits(c.now),
-    c.caps,
+  reason: string,
+  paused: boolean,
+): void {
+  const row = submittedNow(c, seen);
+  if (!row) return;
+  const patch: StageRunPatch = paused
+    ? row.heldSince === null
+      ? { heldSince: c.now }
+      : {}
+    : release(row, c.now);
+  if (reason !== row.waitReason) patch.waitReason = reason;
+  if (Object.keys(patch).length === 0) return;
+  c.t.updateStageRunIf(
+    row.stageRunId,
+    { state: "submitted", attempt: row.attempt },
+    patch,
   );
-  if (reason !== undefined) {
-    if (reason !== row.waitReason || row.heldSince === null) {
-      c.t.updateStageRunIf(row.stageRunId, expect, {
-        waitReason: reason,
-        heldSince: row.heldSince ?? c.now,
-      });
-    }
-    return { held: reason };
-  }
-  if (row.heldSince === null) return { row };
-  const released: StageRunPatch = {
+}
+
+/**
+ * Takes an admitted stage run off the wait: clears its reason and releases
+ * a hold, moving the deadline by the time held. Returns the row as it now
+ * is, or undefined when it is no longer the submitted attempt `seen` was.
+ */
+export function recordAdmit(
+  c: TxCtx,
+  seen: StageRunRow,
+): StageRunRow | undefined {
+  const row = submittedNow(c, seen);
+  if (!row) return undefined;
+  const patch: StageRunPatch = release(row, c.now);
+  if (row.waitReason !== null) patch.waitReason = null;
+  if (Object.keys(patch).length === 0) return row;
+  const ok = c.t.updateStageRunIf(
+    row.stageRunId,
+    { state: "submitted", attempt: row.attempt },
+    patch,
+  );
+  return ok ? ({ ...row, ...patch } as StageRunRow) : undefined;
+}
+
+/** The columns that end a pause's hold on `row`, if one holds it. */
+function release(row: StageRunRow, now: number): StageRunPatch {
+  if (row.heldSince === null) return {};
+  return {
     heldSince: null,
     deadlineAt:
-      row.deadlineAt === null ? null : row.deadlineAt + (c.now - row.heldSince),
+      row.deadlineAt === null ? null : row.deadlineAt + (now - row.heldSince),
   };
-  c.t.updateStageRunIf(row.stageRunId, expect, released);
-  return { row: { ...row, ...released } as StageRunRow };
+}
+
+/** The stage run as it is now, if it is still the submitted attempt `seen` was. */
+function submittedNow(c: TxCtx, seen: StageRunRow): StageRunRow | undefined {
+  const row = c.t.getStageRun(seen.stageRunId);
+  if (row?.state !== "submitted" || row.attempt !== seen.attempt) {
+    return undefined;
+  }
+  return row;
 }
 
 function closeTurn(
