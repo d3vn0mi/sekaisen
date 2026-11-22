@@ -153,7 +153,9 @@ An outcome the stage does not declare, a missing field or a wrong type is refuse
 still alive, so the agent can correct itself:
 
 ```text
-error: outcome "approved" is not declared for stage check; declared outcomes: pass, fail
+unknown outcome "approved". Declared outcomes:
+- pass (no fields)
+- fail (fields: findings: string)
 ```
 
 A token from an earlier attempt is dead: a late turn that wakes up after a retry cannot complete the

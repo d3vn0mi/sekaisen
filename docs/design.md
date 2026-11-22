@@ -301,7 +301,7 @@ project is named after.
 | **Schema** | The file validates against the JSON Schema for its `format`, and every id and name is an identifier |
 | **References** | Every `next` target exists. Every `check`, `action` and polled fact is registered by the host. Every brief exists, and every placeholder names an input or a stage |
 | **Graph** | Every stage is reachable from `start`, every stage that is not an end has a way out, an end is reachable from every stage, and every outcome has a `next` |
-| **Termination** | Every cycle passes through a gate, or through a branch whose guard bounds it, such as `count(check.fail) < 3` |
+| **Termination** | Every cycle passes through an answered operator gate (a timeout edge or a poll gate does not count), or through a branch whose guard bounds it, such as `count(check.fail) < 3` |
 | **Policy** | Every path from `start` to a stage marked `deploys: true` passes a gate that a person resolves |
 | **Timing** | Each stage's turn cap fits within the harness's turn cap, each deadline leaves room for the turns a stage allows, and no gate reminds more often than once a minute, or later than its timeout |
 | **Host checks** | Whatever the host adds, such as checking that each agent has every tool its stage needs |
