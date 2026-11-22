@@ -34,7 +34,8 @@ runtime in any language must reproduce.
 ## Files
 
 A pipeline is one YAML file, conventionally `pipeline.yaml`, with its briefs in the same folder
-or below it. A brief path is relative to the pipeline file and must stay inside its folder.
+or below it. A brief path is relative to the pipeline file and must stay inside its folder, also
+once symlinks are followed: a brief that resolves outside it is a load problem.
 
 A run is pinned to the definition it started on: the SHA-256 of the file and of every brief it
 names. Changing the file changes new runs only.

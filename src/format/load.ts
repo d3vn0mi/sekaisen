@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 import {
@@ -470,20 +470,28 @@ export async function loadDefinition(file: string): Promise<LoadedDefinition> {
   const def = buildDefinition(doc, extensions, problems);
 
   const hash = createHash("sha256").update(bytes);
+  // Symlinks are followed before the folder test, so a link cannot lead a
+  // brief out of the folder; the folder itself may sit under a link.
+  const realDir = await realpath(dir);
   for (const rel of referencedBriefs(def)) {
     const target = path.resolve(dir, rel);
-    const inside = path.relative(dir, target);
-    if (
-      path.isAbsolute(rel) ||
-      inside === ".." ||
-      inside.startsWith(`..${path.sep}`) ||
-      path.isAbsolute(inside)
-    ) {
+    if (path.isAbsolute(rel) || !isInside(dir, target)) {
       problems.push(`brief ${rel}: must be inside the pipeline's folder`);
       continue;
     }
+    let real: string;
     try {
-      const text = await readFile(target);
+      real = await realpath(target);
+    } catch {
+      problems.push(`brief ${rel}: cannot be read`);
+      continue;
+    }
+    if (!isInside(realDir, real)) {
+      problems.push(`brief ${rel}: resolves outside the pipeline's folder`);
+      continue;
+    }
+    try {
+      const text = await readFile(real);
       briefs[rel] = text.toString("utf8");
       hash.update(`\0${rel}\0`).update(text);
     } catch {
@@ -491,4 +499,14 @@ export async function loadDefinition(file: string): Promise<LoadedDefinition> {
     }
   }
   return result(def, hash.digest("hex"));
+}
+
+/** True when `target` is `dir` or lies below it. */
+function isInside(dir: string, target: string): boolean {
+  const inside = path.relative(dir, target);
+  return !(
+    inside === ".." ||
+    inside.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(inside)
+  );
 }

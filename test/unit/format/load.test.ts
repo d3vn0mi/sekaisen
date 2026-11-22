@@ -1,4 +1,12 @@
-import { cp, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdir,
+  mkdtemp,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -242,6 +250,61 @@ describe("loadDefinition", () => {
     expect(problems).toEqual([
       "brief ../outside.md: must be inside the pipeline's folder",
     ]);
+  });
+
+  test("a brief that is a symlink to a file outside the folder is a problem", async () => {
+    const outside = await mkdtemp(path.join(tmpdir(), "sekaisen-outside-"));
+    try {
+      await writeFile(path.join(outside, "secret.md"), "not a brief\n");
+      await rm(path.join(work, "briefs/draft.md"));
+      await symlink(
+        path.join(outside, "secret.md"),
+        path.join(work, "briefs/draft.md"),
+      );
+      const loaded = await loadDefinition(path.join(work, "pipeline.yaml"));
+      expect(loaded.problems).toEqual([
+        "brief briefs/draft.md: resolves outside the pipeline's folder",
+      ]);
+      expect(Object.keys(loaded.briefs)).toEqual(["briefs/check.md"]);
+
+      // A symlinked directory on the way out is caught the same way.
+      await rm(path.join(work, "briefs"), { recursive: true });
+      await mkdir(path.join(outside, "briefs"));
+      await writeFile(path.join(outside, "briefs/draft.md"), "x\n");
+      await writeFile(path.join(outside, "briefs/check.md"), "x\n");
+      await symlink(path.join(outside, "briefs"), path.join(work, "briefs"));
+      const viaDir = await loadDefinition(path.join(work, "pipeline.yaml"));
+      expect(viaDir.problems).toEqual([
+        "brief briefs/check.md: resolves outside the pipeline's folder",
+        "brief briefs/draft.md: resolves outside the pipeline's folder",
+      ]);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("a symlink that stays inside the folder, or a folder reached through one, loads", async () => {
+    await mkdir(path.join(work, "shared"));
+    await rename(
+      path.join(work, "briefs/draft.md"),
+      path.join(work, "shared/draft.md"),
+    );
+    await symlink("../shared/draft.md", path.join(work, "briefs/draft.md"));
+    const loaded = await loadDefinition(path.join(work, "pipeline.yaml"));
+    expect(loaded.problems).toEqual([]);
+    expect(Object.keys(loaded.briefs)).toEqual([
+      "briefs/check.md",
+      "briefs/draft.md",
+    ]);
+    const link = `${work}-link`;
+    await symlink(work, link);
+    try {
+      const via = await loadDefinition(path.join(link, "pipeline.yaml"));
+      expect(via.problems).toEqual([]);
+      expect(via.briefs).toEqual(loaded.briefs);
+    } finally {
+      await rm(link, { force: true });
+    }
   });
 
   test("schema violations become problems with pointers", async () => {
