@@ -37,12 +37,12 @@ const RUN_COLUMNS: Record<keyof RunPatch, string> = {
 };
 
 const STAGE_RUN_COLUMNS: Record<keyof StageRunPatch, string> = {
-  attempt: "attempt",
   state: "state",
   tokenHash: "token_hash",
   adapterRunId: "adapter_run_id",
   sessionKey: "session_key",
   turnsUsed: "turns_used",
+  dispatchSeq: "dispatch_seq",
   deadlineAt: "deadline_at",
   startedAt: "started_at",
   endedAt: "ended_at",
@@ -61,6 +61,12 @@ function toJson(value: unknown): string | null {
 
 function fromJson(text: unknown): unknown {
   return typeof text === "string" ? JSON.parse(text) : null;
+}
+
+function checkLimit(limit: number): void {
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new Error("limit must be a positive integer");
+  }
 }
 
 function placeholders(count: number): string {
@@ -88,12 +94,15 @@ function stageRunFromRow(r: Row): StageRunRow {
     runId: r.run_id as string,
     stage: r.stage as string,
     attempt: r.attempt as number,
+    visit: r.visit as number,
+    retryIndex: r.retry_index as number,
     state: r.state as StageRunState,
     tokenHash: r.token_hash as string | null,
     idempotencyKey: r.idempotency_key as string,
     adapterRunId: r.adapter_run_id as string | null,
     sessionKey: r.session_key as string | null,
     turnsUsed: r.turns_used as number,
+    dispatchSeq: r.dispatch_seq as number,
     deadlineAt: r.deadline_at as number | null,
     createdAt: r.created_at as number,
     startedAt: r.started_at as number | null,
@@ -163,7 +172,7 @@ function buildSet(
   const params: Param[] = [];
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) continue;
-    const column = columns[key];
+    const column = Object.hasOwn(columns, key) ? columns[key] : undefined;
     if (!column) throw new Error(`cannot update column "${key}"`);
     parts.push(`${column} = ?`);
     params.push(
@@ -177,9 +186,15 @@ function buildSet(
 class SqliteTx implements StoreTx {
   private readonly cache = new Map<string, StatementSync>();
 
-  constructor(private readonly db: DatabaseSync) {}
+  constructor(
+    private readonly db: DatabaseSync,
+    private readonly active: () => boolean,
+  ) {}
 
   private stmt(sql: string): StatementSync {
+    if (!this.active()) {
+      throw new Error("store calls must run inside a transaction");
+    }
     let s = this.cache.get(sql);
     if (!s) {
       s = this.db.prepare(sql);
@@ -251,6 +266,7 @@ class SqliteTx implements StoreTx {
     pipelineId?: string;
     limit: number;
   }): RunRow[] {
+    checkLimit(filter.limit);
     const where: string[] = [];
     const params: Param[] = [];
     if (filter.status) {
@@ -290,21 +306,25 @@ class SqliteTx implements StoreTx {
   insertStageRun(row: StageRunRow): void {
     this.run(
       `INSERT INTO stage_runs
-         (stage_run_id, run_id, stage, attempt, state, token_hash,
-          idempotency_key, adapter_run_id, session_key, turns_used,
+         (stage_run_id, run_id, stage, attempt, visit, retry_index, state,
+          token_hash, idempotency_key, adapter_run_id, session_key, turns_used,
+          dispatch_seq,
           deadline_at, created_at, started_at, ended_at, outcome, fields_json,
           progress_note, runtime_json, wait_reason)
-       VALUES (${placeholders(19)})`,
+       VALUES (${placeholders(22)})`,
       row.stageRunId,
       row.runId,
       row.stage,
       row.attempt,
+      row.visit,
+      row.retryIndex,
       row.state,
       row.tokenHash,
       row.idempotencyKey,
       row.adapterRunId,
       row.sessionKey,
       row.turnsUsed,
+      row.dispatchSeq,
       row.deadlineAt,
       row.createdAt,
       row.startedAt,
@@ -340,6 +360,7 @@ class SqliteTx implements StoreTx {
     state?: StageRunState[];
     limit: number;
   }): StageRunRow[] {
+    checkLimit(filter.limit);
     const params: Param[] = [];
     let clause = "";
     if (filter.state) {
@@ -396,6 +417,7 @@ class SqliteTx implements StoreTx {
   }
 
   transitions(runId: string, limit?: number): TransitionRow[] {
+    if (limit !== undefined) checkLimit(limit);
     return this.all(
       `SELECT * FROM (
          SELECT * FROM transitions WHERE run_id = ? ORDER BY id DESC LIMIT ?
@@ -476,6 +498,24 @@ class SqliteTx implements StoreTx {
     return Number(r?.n ?? 0);
   }
 
+  maxAttempt(runId: string, stage: string): number {
+    const r = this.get(
+      "SELECT MAX(attempt) AS n FROM stage_runs WHERE run_id = ? AND stage = ?",
+      runId,
+      stage,
+    );
+    return Number(r?.n ?? 0);
+  }
+
+  countVisits(runId: string, stage: string): number {
+    const r = this.get(
+      "SELECT MAX(visit) AS n FROM stage_runs WHERE run_id = ? AND stage = ?",
+      runId,
+      stage,
+    );
+    return Number(r?.n ?? 0);
+  }
+
   countAttempts(runId: string, stage: string): number {
     const r = this.get(
       "SELECT COUNT(*) AS n FROM stage_runs WHERE run_id = ? AND stage = ?",
@@ -502,7 +542,7 @@ class SqliteStore implements Store {
     private readonly db: DatabaseSync,
     private readonly readonly: boolean,
   ) {
-    this.txApi = new SqliteTx(db);
+    this.txApi = new SqliteTx(db, () => this.depth > 0);
   }
 
   tx<T>(fn: (t: StoreTx) => SyncResult<T>): T {
@@ -552,20 +592,36 @@ function currentVersion(db: DatabaseSync): number {
   return row ? Number(row.value) : 0;
 }
 
-function migrate(db: DatabaseSync, from: number): void {
-  for (let v = from; v < SCHEMA_VERSION; v++) {
-    db.exec("BEGIN IMMEDIATE");
-    try {
+function migrate(db: DatabaseSync): void {
+  // Read the version under the write lock: another process may be creating
+  // the same file at the same moment.
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const from = currentVersion(db);
+    assertNotNewer(from);
+    for (let v = from; v < SCHEMA_VERSION; v++) {
       db.exec(MIGRATIONS[v] as string);
       db.prepare(
         `INSERT INTO meta (key, value) VALUES ('schema_version', ?)
          ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
       ).run(String(v + 1));
-      db.exec("COMMIT");
-    } catch (err) {
-      db.exec("ROLLBACK");
-      throw err;
     }
+    db.exec("COMMIT");
+  } catch (err) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // The failed statement already ended the transaction.
+    }
+    throw err;
+  }
+}
+
+function assertNotNewer(version: number): void {
+  if (version > SCHEMA_VERSION) {
+    throw new Error(
+      `store schema ${version} is newer than this engine (${SCHEMA_VERSION})`,
+    );
   }
 }
 
@@ -581,7 +637,10 @@ export function openSqliteStore(
   if (readonly && path !== ":memory:" && !existsSync(path)) {
     throw new Error(`store ${path} does not exist`);
   }
-  const db = new DatabaseSync(path);
+  if (readonly && path === ":memory:") {
+    throw new Error("an in-memory store cannot be opened read-only");
+  }
+  const db = new DatabaseSync(path, { readOnly: readonly });
   try {
     db.exec("PRAGMA busy_timeout = 5000");
     db.exec("PRAGMA foreign_keys = ON");
@@ -592,11 +651,7 @@ export function openSqliteStore(
       db.exec("PRAGMA synchronous = FULL");
     }
     const version = currentVersion(db);
-    if (version > SCHEMA_VERSION) {
-      throw new Error(
-        `store schema ${version} is newer than this engine (${SCHEMA_VERSION})`,
-      );
-    }
+    assertNotNewer(version);
     if (readonly) {
       if (version < SCHEMA_VERSION) {
         throw new Error(
@@ -604,7 +659,7 @@ export function openSqliteStore(
         );
       }
     } else {
-      migrate(db, version);
+      migrate(db);
       db.prepare(
         `INSERT INTO meta (key, value) VALUES ('engine_version', ?)
          ON CONFLICT (key) DO UPDATE SET value = excluded.value`,

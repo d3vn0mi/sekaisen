@@ -47,7 +47,12 @@ export interface StageRunRow {
   stageRunId: string;
   runId: string;
   stage: string;
+  /** Cumulative attempt number for (run, stage) across every visit and retry. */
   attempt: number;
+  /** How many times the run had entered the stage when this row was created; a retry keeps it. */
+  visit: number;
+  /** 0 for the first attempt of a visit, plus one per retry. */
+  retryIndex: number;
   state: StageRunState;
   /** SHA-256 of the completion token; null once the token is retired. */
   tokenHash: string | null;
@@ -55,6 +60,8 @@ export interface StageRunRow {
   adapterRunId: string | null;
   sessionKey: string | null;
   turnsUsed: number;
+  /** Turns dispatched on this row; bumped in the transaction that records each start. */
+  dispatchSeq: number;
   deadlineAt: number | null;
   /** Creation time; the scheduler admits stage runs oldest first. */
   createdAt: number;
@@ -108,7 +115,14 @@ export type RunPatch = Partial<
 export type StageRunPatch = Partial<
   Omit<
     StageRunRow,
-    "stageRunId" | "runId" | "stage" | "idempotencyKey" | "createdAt"
+    | "stageRunId"
+    | "runId"
+    | "stage"
+    | "attempt"
+    | "visit"
+    | "retryIndex"
+    | "idempotencyKey"
+    | "createdAt"
   >
 >;
 
@@ -166,10 +180,22 @@ export interface StoreTx {
   putLimit(row: LimitRow): void;
   clearLimit(scope: string, key: string): void;
 
+  /** Highest attempt number used for `stage` in the run; 0 when none. */
+  maxAttempt(runId: string, stage: string): number;
+  /** Highest visit number recorded for `stage` in the run; 0 when none. */
+  countVisits(runId: string, stage: string): number;
   /** Completed stage runs of `stage` in the run that ended with `outcome`. */
   countOutcome(runId: string, stage: string, outcome: string): number;
   /** Stage runs ever created for `stage` in the run, across every visit. */
   countAttempts(runId: string, stage: string): number;
+}
+
+/**
+ * The key handed to the harness for the `dispatchSeq`-th turn on a stage run:
+ * the base key for the first, `${base}:${n}` after that.
+ */
+export function turnKey(base: string, dispatchSeq: number): string {
+  return dispatchSeq <= 1 ? base : `${base}:${dispatchSeq}`;
 }
 
 /** A transaction body is synchronous: a Promise-returning function does not type-check. */

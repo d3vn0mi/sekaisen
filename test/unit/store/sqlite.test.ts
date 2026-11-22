@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -12,6 +12,7 @@ import type {
   Store,
   StoreTx,
 } from "../../../src/store/types.js";
+import { turnKey } from "../../../src/store/types.js";
 
 const def = { format: 1, id: "demo", version: 1 } as unknown as Definition;
 
@@ -34,12 +35,15 @@ const stageRun = (over: Partial<StageRunRow> = {}): StageRunRow => ({
   runId: "r1",
   stage: "draft",
   attempt: 1,
+  visit: 1,
+  retryIndex: 0,
   state: "submitted",
   tokenHash: null,
   idempotencyKey: "r1:draft:1",
   adapterRunId: null,
   sessionKey: null,
   turnsUsed: 0,
+  dispatchSeq: 0,
   deadlineAt: null,
   createdAt: 1000,
   startedAt: null,
@@ -327,14 +331,14 @@ describe("rows", () => {
         kind: "operator",
         waitingOn: "operator",
         remindAt: 9,
-        resolvedBy: "hud",
+        resolvedBy: "operator",
         resolvedAt: 8,
         prompt: "ok?",
         outcomes: ["approve", "reject"],
       });
       expect(t.getGate("s1")).toMatchObject({
         remindAt: 9,
-        resolvedBy: "hud",
+        resolvedBy: "operator",
         outcomes: ["approve", "reject"],
       });
       expect(t.getGate("nope")).toBeUndefined();
@@ -487,6 +491,133 @@ describe("rows", () => {
 
   it("enforces foreign keys", () => {
     const store = open();
-    expect(() => store.tx((t) => t.insertRun(run()))).toThrow();
+    expect(() => store.tx((t) => t.insertRun(run()))).toThrow(/FOREIGN KEY/);
+  });
+});
+
+describe("attempts, visits and turn keys", () => {
+  it("turnKey is the base key first, then numbered", () => {
+    expect(turnKey("r1:draft:1", 1)).toBe("r1:draft:1");
+    expect(turnKey("r1:draft:1", 2)).toBe("r1:draft:1:2");
+    expect(turnKey("r1:draft:1", 3)).toBe("r1:draft:1:3");
+  });
+
+  it("maxAttempt and countVisits follow the rows", () => {
+    const store = open();
+    store.tx((t) => {
+      seed(t);
+      expect(t.maxAttempt("r1", "draft")).toBe(0);
+      expect(t.countVisits("r1", "draft")).toBe(0);
+      const mk = (n: number, visit: number, retryIndex: number) =>
+        t.insertStageRun(
+          stageRun({
+            stageRunId: `s${n}`,
+            attempt: n,
+            visit,
+            retryIndex,
+            idempotencyKey: `r1:draft:${n}`,
+          }),
+        );
+      mk(1, 1, 0);
+      mk(2, 1, 1);
+      mk(3, 2, 0);
+      expect(t.maxAttempt("r1", "draft")).toBe(3);
+      expect(t.countVisits("r1", "draft")).toBe(2);
+      expect(t.maxAttempt("r1", "other")).toBe(0);
+    });
+  });
+
+  it("dispatchSeq can be bumped; attempt and key cannot", () => {
+    const store = open();
+    store.tx((t) => {
+      seed(t);
+      t.insertStageRun(stageRun());
+      const e = { state: "submitted", attempt: 1 } as const;
+      expect(t.updateStageRunIf("s1", e, { dispatchSeq: 1 })).toBe(true);
+      expect(t.getStageRun("s1")?.dispatchSeq).toBe(1);
+      for (const key of ["attempt", "visit", "retryIndex", "idempotencyKey"]) {
+        expect(() =>
+          t.updateStageRunIf("s1", e, { [key]: 9 } as never),
+        ).toThrow(/cannot update/);
+      }
+      expect(() =>
+        t.updateStageRunIf("s1", e, { toString: 1 } as never),
+      ).toThrow(/cannot update/);
+    });
+  });
+
+  it("rejects a duplicate idempotency key", () => {
+    const store = open();
+    expect(() =>
+      store.tx((t) => {
+        seed(t);
+        t.insertStageRun(stageRun());
+        t.insertStageRun(stageRun({ stageRunId: "s2" }));
+      }),
+    ).toThrow(/UNIQUE/);
+  });
+});
+
+describe("guards", () => {
+  it("lists need a positive integer limit", () => {
+    const store = open();
+    store.tx((t) => {
+      for (const limit of [0, -1, 1.5, Number.NaN]) {
+        expect(() => t.listRuns({ limit })).toThrow(
+          "limit must be a positive integer",
+        );
+        expect(() => t.listStageRuns({ limit })).toThrow(
+          "limit must be a positive integer",
+        );
+        expect(() => t.transitions("r1", limit)).toThrow(
+          "limit must be a positive integer",
+        );
+      }
+    });
+  });
+
+  it("StoreTx calls outside a transaction throw", () => {
+    const store = open();
+    let leaked: StoreTx | undefined;
+    store.tx((t) => {
+      leaked = t;
+    });
+    expect(() => leaked?.getRun("r1")).toThrow(/inside a transaction/);
+  });
+
+  it("an in-memory store cannot be read-only", () => {
+    expect(() => openSqliteStore(":memory:", { readonly: true })).toThrow(
+      /in-memory/,
+    );
+  });
+
+  it("a read-only open leaves the files untouched", () => {
+    const file = tmpFile();
+    const w = open(file);
+    w.tx((t) => seed(t));
+    w.close();
+    const dir = path.dirname(file);
+    const snapshot = () =>
+      // A WAL reader needs -wal/-shm beside the file; the database itself
+      // must not change.
+      readdirSync(dir)
+        .filter((n) => n === path.basename(file))
+        .map((n) => {
+          const st = statSync(path.join(dir, n));
+          return [n, st.size, st.mtimeMs];
+        });
+    const before = snapshot();
+    const r = openSqliteStore(file, { readonly: true });
+    r.tx((t) => expect(t.getRun("r1")?.runId).toBe("r1"));
+    r.close();
+    expect(snapshot()).toEqual(before);
+  });
+
+  it("two opens of a new file migrate once", () => {
+    const file = tmpFile();
+    const a = open(file);
+    const b = open(file);
+    a.tx((t) => seed(t));
+    b.tx((t) => expect(t.getRun("r1")?.runId).toBe("r1"));
   });
 });
