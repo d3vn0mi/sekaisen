@@ -1,0 +1,25 @@
+format: 1
+id: gate-timeout
+title: A gate that reminds, then one that times out
+version: 1
+start: review
+stages:
+  review:
+    type: gate
+    who: operator
+    prompt: Approve the draft?
+    timeout: 2h
+    on_timeout: { remind: 1h }
+    outcomes:
+      approve: { next: confirm }
+      reject: { next: failed }
+  confirm:
+    type: gate
+    who: operator
+    prompt: Object to publishing? Without an answer within the hour, it goes ahead.
+    timeout: 1h
+    on_timeout: { next: done }
+    outcomes:
+      object: { next: failed }
+  done: { type: end, status: completed }
+  failed: { type: end, status: failed }

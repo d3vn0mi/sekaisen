@@ -1,0 +1,23 @@
+format: 1
+id: lost-retry
+title: A lost turn retried, then retries that run out
+version: 1
+start: draft
+stages:
+  draft:
+    type: agent
+    agent: drafter
+    brief: briefs/draft.md
+    deadline: 30m
+    outcomes:
+      drafted: { next: check }
+  check:
+    type: agent
+    agent: checker
+    brief: briefs/check.md
+    retry: { max: 1, on: [no_result, turn_error] }
+    outcomes:
+      pass: { next: done }
+      fail: { next: failed }
+  done: { type: end, status: completed }
+  failed: { type: end, status: failed }

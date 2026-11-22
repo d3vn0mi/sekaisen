@@ -1,0 +1,47 @@
+format: 1
+id: happy
+title: Draft, check, approve, publish and notify
+version: 1
+inputs:
+  type: object
+  properties:
+    topic: { type: string }
+  required: [topic]
+start: draft
+stages:
+  draft:
+    type: agent
+    agent: drafter
+    brief: briefs/draft.md
+    deadline: 30m
+    outcomes:
+      drafted: { fields: { summary: string }, next: ready }
+      blocked: { fields: { reason: string }, next: failed }
+  ready:
+    type: check
+    check: demo.ready
+    outcomes: { ready: review, not_ready: failed }
+  review:
+    type: gate
+    who: operator
+    prompt: "Publish the draft about {{inputs.topic}}?"
+    timeout: 24h
+    outcomes:
+      approve: { next: publish }
+      reject: { next: failed }
+  publish:
+    type: agent
+    agent: publisher
+    brief: briefs/publish.md
+    outcomes:
+      published:
+        fields: { url: string }
+        next:
+          - { if: 'inputs.topic == "release"', to: notify }
+          - { to: done }
+  notify:
+    type: action
+    action: demo.notify
+    next: done
+  done: { type: end, status: completed }
+  failed: { type: end, status: failed }

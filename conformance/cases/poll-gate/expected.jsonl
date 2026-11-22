@@ -1,0 +1,10 @@
+{"seq":1,"run_stage":"run","from":null,"to":"working","event":"run_created","actor":"simulator"}
+{"seq":2,"run_stage":"open_request","from":null,"to":"submitted","event":"stage_submitted","actor":"simulator"}
+{"seq":3,"run_stage":"open_request","from":"submitted","to":"failed","event":"turn_error","actor":"engine"}
+{"seq":4,"run_stage":"open_request","from":null,"to":"submitted","event":"stage_submitted","actor":"engine"}
+{"seq":5,"run_stage":"open_request","from":"submitted","to":"completed","event":"stage_completed","actor":"action:demo.open_request"}
+{"seq":6,"run_stage":"merged","from":null,"to":"submitted","event":"stage_submitted","actor":"engine"}
+{"seq":7,"run_stage":"merged","from":"submitted","to":"working","event":"gate_opened","actor":"engine"}
+{"seq":8,"run_stage":"merged","from":"working","to":"completed","event":"gate_passed","outcome":"merged","actor":"fact:demo.merged"}
+{"seq":9,"run_stage":"run","from":"working","to":"completed","event":"run_ended","actor":"engine"}
+{"status":"completed"}

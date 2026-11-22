@@ -1,0 +1,20 @@
+format: 1
+id: poll-gate
+title: Open a request, then wait for it to be merged
+version: 1
+start: open_request
+stages:
+  open_request:
+    type: action
+    action: demo.open_request
+    retry: { max: 1 }
+    next: merged
+  merged:
+    type: gate
+    poll: { fact: demo.merged, every: 10m }
+    timeout: 2h
+    on_timeout: { next: failed }
+    outcomes:
+      merged: { next: done }
+  done: { type: end, status: completed }
+  failed: { type: end, status: failed }

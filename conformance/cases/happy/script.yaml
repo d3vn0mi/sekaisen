@@ -1,0 +1,12 @@
+inputs: { topic: release }
+stages:
+  draft:
+    - { outcome: drafted, fields: { summary: A short draft. }, after: 5m }
+  review:
+    - { resolve: approve, after: 1h }
+  publish:
+    - { outcome: published, fields: { url: notes/release }, after: 2m }
+checks:
+  demo.ready: [ready]
+actions:
+  demo.notify: [ok]

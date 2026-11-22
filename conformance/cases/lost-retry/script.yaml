@@ -1,0 +1,7 @@
+stages:
+  draft:
+    - { ending: lost, after: 5m }
+    - { outcome: drafted, after: 5m }
+  check:
+    - { ending: no_result, after: 1m }
+    - { ending: turn_error, after: 1m }

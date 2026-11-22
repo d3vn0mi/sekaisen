@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, test } from "vitest";
@@ -27,6 +27,19 @@ afterAll(() => {
 async function fixLoop(): Promise<LoadedDefinition> {
   const loaded = await loadDefinition(FIX_LOOP);
   if (loaded.problems.length > 0) throw new Error(loaded.problems.join("\n"));
+  return loaded;
+}
+
+/** Loads a definition written to a temporary folder, with an empty brief for each agent stage. */
+async function defFrom(yaml: string): Promise<LoadedDefinition> {
+  const dir = mkdtempSync(path.join(tmpdir(), "sekaisen-sim-"));
+  dirs.push(dir);
+  mkdirSync(path.join(dir, "briefs"));
+  writeFileSync(path.join(dir, "briefs", "draft.md"), "Write the draft.\n");
+  const file = path.join(dir, "pipeline.yaml");
+  writeFileSync(file, yaml);
+  const loaded = await loadDefinition(file);
+  expect(loaded.problems).toEqual([]);
   return loaded;
 }
 
@@ -414,6 +427,111 @@ stages:
     expect(r.elapsedMs).toBe(20 * 60_000);
   });
 
+  test("a scripted cancel cancels the run at its time and runs on_cancel once", async () => {
+    const loaded = await defFrom(`format: 1
+id: cancel-flow
+version: 1
+start: draft
+on_cancel: cleanup
+stages:
+  draft:
+    type: agent
+    agent: drafter
+    brief: briefs/draft.md
+    outcomes: { drafted: { next: done } }
+  cleanup: { type: action, action: demo.cleanup, next: failed }
+  done: { type: end, status: completed }
+  failed: { type: end, status: failed }
+`);
+    const r = await simulate(
+      loaded,
+      parseScript(
+        "stages: { draft: [ { outcome: drafted, after: 1h } ] }\ncancel: { after: 10m }",
+        loaded.def,
+      ),
+    );
+    expect(r.status).toBe("canceled");
+    expect(r.reachedEnd).toBe(false);
+    expect(r.problems).toEqual([]);
+    expect(r.elapsedMs).toBe(10 * 60_000);
+    expect(r.log.map((l) => `${l.run_stage}:${l.event}:${l.actor}`)).toEqual([
+      "run:run_created:simulator",
+      "draft:stage_submitted:simulator",
+      "draft:turn_started:engine",
+      "draft:stage_canceled:simulator",
+      "draft:abort_requested:simulator",
+      "run:run_canceled:simulator",
+      "cleanup:stage_submitted:simulator",
+      "draft:abort_settled:engine",
+      "cleanup:cancel_action_completed:engine",
+    ]);
+    expect(r.notes).toEqual([
+      "overtaken: draft: outcome drafted was due after the stage run had moved on",
+    ]);
+  });
+
+  test("a cancel due after the run ended is left out with a note", async () => {
+    const r = await run("inputs: { topic: rust }\ncancel: { after: 1h }");
+    expect(r.status).toBe("completed");
+    expect(r.elapsedMs).toBe(0);
+    expect(r.notes).toEqual([
+      "overtaken: cancel was due after the run had ended",
+    ]);
+  });
+
+  test("a progress visit saves a checkpoint and the attempt continues", async () => {
+    const loaded = await defFrom(`format: 1
+id: long-draft
+version: 1
+start: draft
+stages:
+  draft:
+    type: agent
+    agent: drafter
+    brief: briefs/draft.md
+    turns: { max: 2 }
+    outcomes: { drafted: { next: done } }
+  done: { type: end, status: completed }
+  failed: { type: end, status: failed }
+`);
+    const r = await simulate(
+      loaded,
+      parseScript(
+        "stages:\n  draft: [ { progress: half done, after: 5m }, { outcome: drafted, after: 5m } ]",
+        loaded.def,
+      ),
+    );
+    expect(r.status).toBe("completed");
+    expect(r.problems).toEqual([]);
+    expect(r.elapsedMs).toBe(10 * 60_000);
+    expect(
+      r.log.map((l) => `${l.run_stage}:${l.from}>${l.to}:${l.event}`),
+    ).toEqual([
+      "run:null>working:run_created",
+      "draft:null>submitted:stage_submitted",
+      "draft:submitted>working:turn_started",
+      "draft:working>working:progress",
+      "draft:working>submitted:continue",
+      "draft:submitted>working:turn_started",
+      "draft:working>completed:stage_completed",
+      "run:working>completed:run_ended",
+    ]);
+  });
+
+  test("inspect sees the store of the run before it closes", async () => {
+    let seen: { status?: string; rows?: number } = {};
+    const loaded = await fixLoop();
+    await simulate(loaded, parseScript("inputs: { topic: rust }", loaded.def), {
+      inspect: (store, runId) => {
+        seen = store.tx((t) => ({
+          status: t.getRun(runId)?.status,
+          rows: t.transitions(runId).length,
+        }));
+      },
+    });
+    expect(seen).toEqual({ status: "completed", rows: 12 });
+  });
+
   test("a run that cannot move reports stalled", async () => {
     const loaded = await fixLoop();
     const def = structuredClone(loaded.def);
@@ -542,7 +660,10 @@ stages:
     - { ending: lost, resets: 1h }
     - { outcome: drafted, colour: red }
     - just a string
-  review: [ { resolve: maybe }, { outcome: approve }, { ending: lost } ]
+    - { progress: 3 }
+    - { progress: "  " }
+    - { progress: noted, fields: {} }
+  review: [ { resolve: maybe }, { outcome: approve }, { ending: lost }, { progress: noted } ]
   publish: [ { outcome: next } ]
 actions: { demo.publish: [ maybe ], demo.other: [ ok ] }
 checks: { demo.ready: [ yes ] }
@@ -557,20 +678,42 @@ extra: 1
         /^stages\.draft\[1\]: fields for outcome drafted are invalid/,
       ),
       'stages.draft[2]: unknown ending "exploded"; one of no_result, lost, timeout, usage_limited, turn_error',
-      "stages.draft[3]: a visit has exactly one of outcome, ending or resolve",
+      "stages.draft[3]: a visit has exactly one of outcome, ending, progress or resolve",
       'stages.draft[4]: after: invalid duration: "soon"',
-      "stages.draft[5]: draft is an agent stage; use outcome or ending",
+      "stages.draft[5]: draft is an agent stage; use outcome, progress or ending",
       "stages.draft[6]: resets goes only with ending: usage_limited",
       "stages.draft[7]: unknown key colour",
       "stages.draft[8]: a visit must be a mapping",
+      "stages.draft[9]: progress takes a note, a non-empty string",
+      "stages.draft[10]: progress takes a note, a non-empty string",
+      "stages.draft[11]: fields go only with outcome",
       'stages.review[0]: unknown outcome "maybe"; declared: approve, reject',
       "stages.review[1]: review is a gate; use resolve, or ending: timeout",
       "stages.review[2]: a gate's only ending is timeout",
+      "stages.review[3]: review is a gate; use resolve, or ending: timeout",
       "stages.publish: publish is an action stage; script its action under actions",
       'actions.demo.publish[0]: "maybe" is neither ok nor fail',
       "actions.demo.other: no action stage runs demo.other",
       "checks.demo.ready: no check stage runs demo.ready",
       "facts.demo.done: no gate polls demo.done",
+    ]);
+  });
+
+  test("cancel takes one key, after, a duration", async () => {
+    expect(
+      await errors("inputs: { topic: rust }\ncancel: { after: 10m }"),
+    ).toEqual([]);
+    expect(
+      await errors("inputs: { topic: rust }\ncancel: { after: soon }"),
+    ).toEqual(['cancel: after: invalid duration: "soon"']);
+    expect(await errors("inputs: { topic: rust }\ncancel: 10m")).toEqual([
+      "cancel must be a mapping with after",
+    ]);
+    expect(
+      await errors("inputs: { topic: rust }\ncancel: { after: 1m, by: me }"),
+    ).toEqual(["cancel: unknown key by"]);
+    expect(await errors("inputs: { topic: rust }\ncancel: {}")).toEqual([
+      "cancel: after is required",
     ]);
   });
 

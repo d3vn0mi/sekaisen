@@ -1,0 +1,25 @@
+format: 1
+id: cancel
+title: A run canceled while a turn is in flight
+version: 1
+start: draft
+on_cancel: cleanup
+stages:
+  draft:
+    type: agent
+    agent: drafter
+    brief: briefs/draft.md
+    outcomes:
+      drafted: { next: publish }
+  publish:
+    type: agent
+    agent: publisher
+    brief: briefs/publish.md
+    outcomes:
+      published: { next: done }
+  cleanup:
+    type: action
+    action: demo.cleanup
+    next: failed
+  done: { type: end, status: completed }
+  failed: { type: end, status: failed }

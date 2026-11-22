@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   BRIEF_FOOTER,
@@ -143,5 +144,10 @@ describe("renderContinuation", () => {
     expect(renderContinuation(null, "TOK", outcomes)).toContain(
       "Continue the task",
     );
+  });
+
+  it("the format reference quotes the footer exactly", () => {
+    const doc = readFileSync("docs/format.md", "utf8");
+    expect(doc).toContain(`\`\`\`text\n${BRIEF_FOOTER}\`\`\``);
   });
 });

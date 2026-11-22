@@ -1,0 +1,5 @@
+stages:
+  draft:
+    - { ending: usage_limited, after: 10m, resets: 30m }
+    - { ending: usage_limited, after: 1m }
+    - { outcome: drafted, after: 5m }

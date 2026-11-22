@@ -1,0 +1,5 @@
+stages:
+  review:
+    - { resolve: approve, after: 210m }
+  confirm:
+    - { ending: timeout }

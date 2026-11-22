@@ -1,0 +1,15 @@
+format: 1
+id: usage-pause
+title: A stage paused by usage limits
+version: 1
+start: draft
+stages:
+  draft:
+    type: agent
+    agent: drafter
+    brief: briefs/draft.md
+    deadline: 30m
+    outcomes:
+      drafted: { next: done }
+  done: { type: end, status: completed }
+  failed: { type: end, status: failed }

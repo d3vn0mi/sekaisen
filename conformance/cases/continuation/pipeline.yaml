@@ -1,0 +1,17 @@
+format: 1
+id: continuation
+title: A stage longer than one turn
+version: 1
+start: draft
+stages:
+  draft:
+    type: agent
+    agent: drafter
+    brief: briefs/draft.md
+    deadline: 30m
+    turns: { max: 2 }
+    retry: { max: 1, on: [timeout] }
+    outcomes:
+      drafted: { fields: { summary: string }, next: done }
+  done: { type: end, status: completed }
+  failed: { type: end, status: failed }

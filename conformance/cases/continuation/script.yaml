@@ -1,0 +1,5 @@
+stages:
+  draft:
+    - { progress: "Outline done; the body is next.", after: 20m }
+    - { outcome: drafted, fields: { summary: Too late. }, after: 15m }
+    - { outcome: drafted, fields: { summary: A short draft. }, after: 5m }

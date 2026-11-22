@@ -1,0 +1,7 @@
+stages:
+  draft:
+    - { outcome: drafted }
+    - { outcome: drafted }
+  check:
+    - { outcome: fail, fields: { findings: The title is missing. } }
+    - { outcome: fail, fields: { findings: The title is still missing. } }

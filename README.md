@@ -186,21 +186,21 @@ interface.
 
 The road to 0.1:
 
-- [ ] **Format 1.** The `agent`, `gate`, `check`, `action`, `wait` and `end` stage types, a published
+- [x] **Format 1.** The `agent`, `gate`, `check`, `action`, `wait` and `end` stage types, a published
       JSON Schema, a small guard language and brief templates.
-- [ ] **Checks.** Schema, references, graph, termination, policy and timing, plus a hook for checks the
+- [x] **Checks.** Schema, references, graph, termination, policy and timing, plus a hook for checks the
       host adds. `sekaisen check`.
-- [ ] **Rendering.** Mermaid state diagrams. `sekaisen render`.
-- [ ] **Interpreter and store.** SQLite on `node:sqlite`, compare-and-set state changes, the
+- [x] **Rendering.** Mermaid state diagrams. `sekaisen render`.
+- [x] **Interpreter and store.** SQLite on `node:sqlite`, compare-and-set state changes, the
       append-only transition log, deadlines and retries, and restart reconciliation with a test that
       kills the process mid-dispatch.
-- [ ] **Typed completion.** `stage_complete` and `stage_progress`, and continuation turns for stages
+- [x] **Typed completion.** `stage_complete` and `stage_progress`, and continuation turns for stages
       longer than one turn.
-- [ ] **Scheduler.** Per-agent work limits, a global lane cap, priority and fairness, and a pause on a
+- [x] **Scheduler.** Per-agent work limits, a global lane cap, priority and fairness, and a pause on a
       provider's usage limit.
-- [ ] **Simulation.** Scripted outcomes on a virtual clock, with transition coverage, and `--explore`
+- [x] **Simulation.** Scripted outcomes on a virtual clock, with transition coverage, and `--explore`
       to walk every path up to a bound. `sekaisen simulate`.
-- [ ] **Conformance suite.** Definitions, scripts and expected transition logs, in a language-neutral
+- [x] **Conformance suite.** Definitions, scripts and expected transition logs, in a language-neutral
       form.
 - [ ] **MCP completion server.** `stage_complete` and `stage_progress` for harnesses that speak MCP and
       have no plugin system.

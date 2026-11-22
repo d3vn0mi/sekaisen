@@ -8,6 +8,7 @@ import type { Script, SimEnding } from "./script.js";
 import {
   type Answer,
   type Decision,
+  type SimulateOptions,
   type SimulationResult,
   simulate,
 } from "./simulate.js";
@@ -27,6 +28,12 @@ export interface ExploreOptions {
    * @internal
    */
   prune?: boolean;
+  /**
+   * Called for each path simulated, with its store and run id before the
+   * store is closed.
+   * @internal
+   */
+  inspect?: SimulateOptions["inspect"];
 }
 
 /** Ticks a path may take by default: a sound definition's paths need far fewer. */
@@ -112,6 +119,7 @@ export async function explore(
       .map(([id]) => id),
     prune,
     maxSteps: opts.maxSteps ?? EXPLORE_MAX_STEPS,
+    inspect: opts.inspect,
     script: {
       stages: {},
       facts: {},
@@ -167,6 +175,7 @@ interface RunContext {
   deploys: string[];
   prune: boolean;
   maxSteps: number;
+  inspect: SimulateOptions["inspect"];
   script: Script;
   /** The choices of each stage and decision kind, built once. */
   choices: Map<string, Choice[]>;
@@ -203,6 +212,7 @@ async function runPath(ctx: RunContext, prefix: number[]): Promise<PathRun> {
   const result = await simulate(ctx.loaded, ctx.script, {
     decide,
     maxSteps: ctx.maxSteps,
+    ...(ctx.inspect === undefined ? {} : { inspect: ctx.inspect }),
   });
   const refused = result.problems.find((p) =>
     p.startsWith("completion_refused"),

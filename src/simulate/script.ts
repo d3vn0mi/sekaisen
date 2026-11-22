@@ -25,6 +25,8 @@ export interface Script {
   /** By action name: whether each call succeeds or throws, in order. */
   actions: Record<string, Array<"ok" | "fail">>;
   inputs: unknown;
+  /** Cancels the run this long after it starts, if it has not ended by then. */
+  cancel?: { after: Duration };
 }
 
 /** The engine-classified endings a simulated agent turn can have. */
@@ -39,7 +41,8 @@ export type SimEnding = (typeof SIM_ENDINGS)[number];
 
 /**
  * One entry of a stage. `after` is how long after the turn starts (or the
- * gate opens) the entry takes effect; 0 when not given.
+ * gate opens) the entry takes effect; 0 when not given. `progress` saves a
+ * checkpoint with its note and ends the turn without completing the stage.
  */
 export type Visit =
   | {
@@ -48,6 +51,7 @@ export type Visit =
       fields: Record<string, unknown>;
       after: Duration;
     }
+  | { kind: "progress"; note: string; after: Duration }
   /** `resets`: for `usage_limited`, how long until the limit lifts. */
   | { kind: "ending"; ending: SimEnding; after: Duration; resets?: Duration }
   | { kind: "resolve"; outcome: string; after: Duration };
@@ -60,10 +64,11 @@ export class ScriptError extends Error {
   }
 }
 
-const TOP_KEYS = ["stages", "facts", "checks", "actions", "inputs"];
+const TOP_KEYS = ["stages", "facts", "checks", "actions", "inputs", "cancel"];
 const VISIT_KEYS = [
   "outcome",
   "ending",
+  "progress",
   "resolve",
   "fields",
   "after",
@@ -118,6 +123,8 @@ export function parseScript(text: string, def: Definition): Script {
     }),
     inputs: top.inputs === undefined ? {} : top.inputs,
   };
+  const cancel = readCancel(top.cancel, problems);
+  if (cancel !== undefined) script.cancel = cancel;
   const inputErrors = def.inputs
     ? validateJson(def.inputs, script.inputs)
     : isPlainObject(script.inputs)
@@ -128,6 +135,33 @@ export function parseScript(text: string, def: Definition): Script {
   }
   if (problems.length > 0) throw new ScriptError(problems);
   return script;
+}
+
+/** The script's `cancel: { after }`, or undefined when it has none or it is malformed. */
+function readCancel(
+  raw: unknown,
+  problems: string[],
+): { after: Duration } | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!isPlainObject(raw)) {
+    problems.push("cancel must be a mapping with after");
+    return undefined;
+  }
+  const unknown = Object.keys(raw).find((k) => k !== "after");
+  if (unknown !== undefined) {
+    problems.push(`cancel: unknown key ${unknown}`);
+    return undefined;
+  }
+  if (raw.after === undefined) {
+    problems.push("cancel: after is required");
+    return undefined;
+  }
+  try {
+    return { after: parseDuration(raw.after as string) };
+  } catch (err) {
+    problems.push(`cancel: after: ${(err as Error).message}`);
+    return undefined;
+  }
 }
 
 function readStages(
@@ -193,9 +227,11 @@ function readVisit(
   if (!isPlainObject(entry)) return "a visit must be a mapping";
   const unknown = Object.keys(entry).find((k) => !VISIT_KEYS.includes(k));
   if (unknown !== undefined) return `unknown key ${unknown}`;
-  const kinds = ["outcome", "ending", "resolve"].filter((k) => k in entry);
+  const kinds = ["outcome", "ending", "progress", "resolve"].filter(
+    (k) => k in entry,
+  );
   if (kinds.length !== 1) {
-    return "a visit has exactly one of outcome, ending or resolve";
+    return "a visit has exactly one of outcome, ending, progress or resolve";
   }
   let after = 0;
   if (entry.after !== undefined) {
@@ -232,7 +268,14 @@ function readVisit(
   }
 
   if ("resolve" in entry)
-    return `${id} is an agent stage; use outcome or ending`;
+    return `${id} is an agent stage; use outcome, progress or ending`;
+  if ("progress" in entry) {
+    const note = entry.progress;
+    if (typeof note !== "string" || note.trim() === "") {
+      return "progress takes a note, a non-empty string";
+    }
+    return { kind: "progress", note, after };
+  }
   if ("ending" in entry) {
     const ending = entry.ending;
     if (!SIM_ENDINGS.includes(ending as SimEnding)) {

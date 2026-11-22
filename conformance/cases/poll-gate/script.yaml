@@ -1,0 +1,4 @@
+actions:
+  demo.open_request: [fail, ok]
+facts:
+  demo.merged: [false, false, true]

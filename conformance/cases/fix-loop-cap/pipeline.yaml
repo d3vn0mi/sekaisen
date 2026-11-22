@@ -1,0 +1,25 @@
+format: 1
+id: fix-loop-cap
+title: A draft and check loop that stops at its cap
+version: 1
+start: draft
+stages:
+  draft:
+    type: agent
+    agent: drafter
+    brief: briefs/draft.md
+    outcomes:
+      drafted: { next: check }
+  check:
+    type: agent
+    agent: checker
+    brief: briefs/check.md
+    outcomes:
+      pass: { next: done }
+      fail:
+        fields: { findings: string }
+        next:
+          - { if: "count(check.fail) < 2", to: draft }
+          - { to: failed }
+  done: { type: end, status: completed }
+  failed: { type: end, status: failed }

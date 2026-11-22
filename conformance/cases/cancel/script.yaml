@@ -1,0 +1,8 @@
+stages:
+  draft:
+    - { outcome: drafted, after: 5m }
+  publish:
+    - { outcome: published, after: 1h }
+actions:
+  demo.cleanup: [ok]
+cancel: { after: 30m }

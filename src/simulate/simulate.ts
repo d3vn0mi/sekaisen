@@ -95,6 +95,12 @@ export interface SimulateOptions {
    * default (the first outcome, success, a fact that holds).
    */
   decide?: (d: Decision) => Answer | undefined;
+  /**
+   * Called with the store and the run's id once the simulation is over,
+   * before the store is closed.
+   * @internal
+   */
+  inspect?: (store: Store, runId: string) => void;
 }
 
 /** Who the simulator's own transitions (start, gate answers) name. */
@@ -126,7 +132,7 @@ export async function simulate(
   }
   const store = openSqliteStore(":memory:");
   try {
-    return await new Simulation(loaded, script, store, opts.decide).run(
+    return await new Simulation(loaded, script, store, opts).run(
       opts.maxSteps ?? DEFAULT_MAX_STEPS,
     );
   } finally {
@@ -150,9 +156,9 @@ class ScriptedAdapter extends FakeAdapter {
   }
 }
 
-/** A turn's visit the simulator plays: an outcome, or an ending other than a timeout. */
+/** A turn's visit the simulator plays: an outcome, a checkpoint, or an ending other than a timeout. */
 type Played =
-  | Extract<Visit, { kind: "outcome" }>
+  | Extract<Visit, { kind: "outcome" | "progress" }>
   | (Extract<Visit, { kind: "ending" }> & {
       ending: Exclude<SimEnding, "timeout">;
     });
@@ -191,14 +197,19 @@ class Simulation {
   /** Whether a polled fact holds, by stage run, once a decision said so. */
   private readonly polls = new Map<string, boolean>();
   private stopRequested = false;
+  /** When the script cancels the run, until the cancel has happened. */
+  private cancelAt: number | undefined;
+  private readonly decide: SimulateOptions["decide"];
 
   constructor(
     private readonly loaded: LoadedDefinition,
     private readonly script: Script,
     private readonly store: Store,
-    private readonly decide: SimulateOptions["decide"],
+    private readonly opts: SimulateOptions,
   ) {
     this.def = loaded.def;
+    this.decide = opts.decide;
+    if (script.cancel) this.cancelAt = START + script.cancel.after;
     this.registry = this.hostFunctions();
     this.engine = this.newEngine();
   }
@@ -210,7 +221,7 @@ class Simulation {
       { actor: SIMULATOR_ACTOR },
     );
     let steps = 0;
-    while (!this.ended(runId)) {
+    while (!this.finished(runId)) {
       if (this.stopRequested) {
         this.problems.push("stopped: a decision ended the simulation");
         break;
@@ -223,6 +234,13 @@ class Simulation {
       }
       steps++;
       const before = this.transitionCount(runId);
+      // A cancel due now comes before the tick and any answer due now.
+      if (this.cancelAt !== undefined && this.clock.now() >= this.cancelAt) {
+        this.cancelAt = undefined;
+        if (!this.ended(runId)) {
+          await this.engine.cancel(runId, SIMULATOR_ACTOR);
+        }
+      }
       await this.engine.tick();
       this.take(runId);
       const resolved = await this.resolveDue();
@@ -235,6 +253,10 @@ class Simulation {
       this.clock.set(next);
     }
     for (const p of this.pending) if (!this.stillWaiting(p)) this.drop(p);
+    if (this.cancelAt !== undefined && this.ended(runId)) {
+      this.notes.push("overtaken: cancel was due after the run had ended");
+    }
+    this.opts.inspect?.(this.store, runId);
     return this.result(runId);
   }
 
@@ -473,6 +495,17 @@ class Simulation {
   /** Ends a turn as its visit says. */
   private async answer(p: Extract<Pending, { kind: "turn" }>): Promise<void> {
     const { visit, adapterRunId } = p;
+    if (visit.kind === "progress") {
+      const r = await this.engine.progress({
+        token: p.token,
+        note: visit.note,
+      });
+      if (!r.ok) {
+        this.problems.push(`progress_refused: ${p.stage}: ${r.error}`);
+      }
+      this.adapter.setOutcome(adapterRunId, { state: "ended", ending: "ok" });
+      return;
+    }
     if (visit.kind === "outcome") {
       const r = await this.engine.complete({
         token: p.token,
@@ -525,7 +558,9 @@ class Simulation {
         ? `resolve ${p.outcome}`
         : p.visit.kind === "outcome"
           ? `outcome ${p.visit.outcome}`
-          : `ending ${p.visit.ending}`;
+          : p.visit.kind === "progress"
+            ? "progress"
+            : `ending ${p.visit.ending}`;
     this.notes.push(
       `overtaken: ${p.stage}: ${what} was due after the stage run had moved on`,
     );
@@ -558,6 +593,7 @@ class Simulation {
       }
       for (const limit of t.listLimits(now)) times.push(limit.pausedUntil);
     });
+    if (this.cancelAt !== undefined) times.push(this.cancelAt);
     const future = times.filter((x) => x > now);
     return future.length === 0 ? undefined : Math.min(...future);
   }
@@ -567,6 +603,14 @@ class Simulation {
   private ended(runId: string): boolean {
     const run = this.store.tx((t) => t.getRun(runId));
     return run !== undefined && ENDED.includes(run.status);
+  }
+
+  /** The run has ended and nothing of it is left to run (a cancel action runs after its run ended). */
+  private finished(runId: string): boolean {
+    return (
+      this.ended(runId) &&
+      this.store.tx((t) => t.liveStageRun(runId)) === undefined
+    );
   }
 
   private transitionCount(runId: string): number {
@@ -634,6 +678,7 @@ function minimalOf(
 function isPlayed(visit: Visit): visit is Played {
   return (
     visit.kind === "outcome" ||
+    visit.kind === "progress" ||
     (visit.kind === "ending" && visit.ending !== "timeout")
   );
 }
