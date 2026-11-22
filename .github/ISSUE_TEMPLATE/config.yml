@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions, ideas and design feedback
+    url: https://github.com/d3vn0mi/sekaisen/discussions
+    about: Ask a question, share a use case or discuss the design in GitHub Discussions.
+  - name: Report a security vulnerability
+    url: https://github.com/d3vn0mi/sekaisen/security/advisories/new
+    about: Report it privately, never in a public issue. See SECURITY.md.

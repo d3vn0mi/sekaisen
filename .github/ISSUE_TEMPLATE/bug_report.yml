@@ -1,0 +1,97 @@
+name: Bug report
+description: Something sekaisen does wrong. Reproduce it with a minimal definition and a simulation script, never with private prompts or data.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to report a bug.
+
+        - **A security problem?** Do not open an issue. Report it privately, as [SECURITY.md](https://github.com/d3vn0mi/sekaisen/blob/main/SECURITY.md) describes.
+        - **No private data.** Reproduce with the smallest pipeline definition you can write, using neutral roles such as `drafter`, `checker` and `publisher`, and host names with a `demo.` prefix. Never paste real prompts or briefs, transcripts, secrets, host names or state databases (`*.sqlite`).
+        - sekaisen is **pre-0.1**, so some things are not built yet.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Format, schema or guards
+        - Checks (sekaisen check)
+        - Interpreter, store or restart reconciliation
+        - Scheduler
+        - Simulation (sekaisen simulate, --explore)
+        - Completion tools or the MCP server
+        - An adapter
+        - CLI (render, status, runs)
+        - Conformance suite
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: sekaisen version or commit
+      placeholder: "0.1.0, or a commit SHA"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected to see instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: definition
+    attributes:
+      label: The pipeline definition
+      description: The smallest definition that shows the problem.
+      render: yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The simulation script and the command, or the adapter calls if only a live harness shows it.
+      placeholder: |
+        1. sekaisen check pipeline.yaml
+        2. sekaisen simulate pipeline.yaml --script script.yaml
+        3. The run goes to ... instead of ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: The output or transition log
+      description: What the command printed, or the transitions of the run. Leave it empty if there is none.
+      render: text
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Your OS and Node.js version, and the adapter and harness in use, if any.
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: I reproduced this with a minimal definition, or I described the adapter calls with every private value removed.
+          required: true
+        - label: This report holds no private prompts, transcripts, secrets, host names or state databases.
+          required: true
+        - label: I searched the existing issues, and this one is new.
+          required: true

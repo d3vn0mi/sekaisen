@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use sekaisen in your work, please cite it as below."
+type: software
+title: "sekaisen: a durable pipeline engine for AI agents in external harnesses"
+abstract: >-
+  sekaisen runs multi-stage work across AI agents that live in an external
+  harness. Each pipeline is one YAML state machine. The engine dispatches a
+  turn and returns at once, and the run resumes when the agent completes its
+  stage with one of the declared outcomes. Runs survive restarts, every step
+  is written to an append-only transition log, definitions are checked before
+  a run, every path can be simulated on a virtual clock, and a scheduler
+  treats agents and usage limits as scarce.
+authors:
+  - alias: d3vn0mi
+    website: "https://github.com/d3vn0mi"
+license: MIT
+repository-code: "https://github.com/d3vn0mi/sekaisen"
+url: "https://github.com/d3vn0mi/sekaisen"
+keywords:
+  - ai agents
+  - pipeline engine
+  - workflow
+  - state machine
+  - durable execution
+  - agent orchestration
+  - a2a
+  - model context protocol

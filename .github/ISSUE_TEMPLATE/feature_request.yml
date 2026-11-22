@@ -1,0 +1,63 @@
+name: Feature request
+description: Suggest an improvement. A change to the pipeline format has its own form; for an open-ended idea, start a discussion first.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the idea. sekaisen is **pre-0.1**, and it aims to stay small: a core a stranger can read in an afternoon.
+
+        - **Does it change the format**, the stage-run states or the transition log? Use the **Format change proposal** form instead.
+        - Larger or open-ended ideas fit better in [Discussions](https://github.com/d3vn0mi/sekaisen/discussions), where the design can be talked through before anyone writes code.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Checks (sekaisen check)
+        - Interpreter, store or restart reconciliation
+        - Scheduler
+        - Simulation (sekaisen simulate, --explore)
+        - Completion tools or the MCP server
+        - Adapters and harnesses
+        - CLI (render, status, runs)
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and what gets in the way today. Use neutral roles and `demo.` host names in any example.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: The behaviour you have in mind. For the CLI or an adapter, sketch the call and what you would expect back.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Other approaches or workarounds, and why they fall short.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: It does not need the engine to call a model, parse free text, run arbitrary code from a definition, or let a completion tool resolve a gate.
+          required: true
+        - label: This request holds no private prompts, transcripts or secrets.
+          required: true
+        - label: I searched the existing issues and discussions, and this one is new.
+          required: true

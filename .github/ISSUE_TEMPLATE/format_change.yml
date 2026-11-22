@@ -1,0 +1,71 @@
+name: Format change proposal
+description: Propose a change to the pipeline format, the stage-run states, the brief footer or the transition-log shape. Agree it here before anyone writes code.
+title: "format: "
+labels: ["format"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The pipeline format and the conformance suite are sekaisen's public contract: a runtime in any language is conformant if it reproduces the suite's transition logs. So a change to the format is agreed here first, then implemented with its conformance cases. [CONTRIBUTING.md](https://github.com/d3vn0mi/sekaisen/blob/main/CONTRIBUTING.md#proposing-a-format-change) describes the process.
+
+  - type: dropdown
+    id: part
+    attributes:
+      label: What changes
+      options:
+        - A stage type
+        - A field of a stage, an outcome or the pipeline
+        - The guard language
+        - The stage-run or run states
+        - The brief template or its footer
+        - The transition-log shape
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Why
+      description: The pipeline you cannot write today, or what goes wrong with the format as it is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: yaml
+    attributes:
+      label: The YAML you would write
+      description: A minimal definition using the change. Use neutral roles such as `drafter`, `checker` and `publisher`, and host names with a `demo.` prefix.
+      render: yaml
+    validations:
+      required: true
+
+  - type: dropdown
+    id: compatibility
+    attributes:
+      label: Effect on existing definitions
+      description: An optional addition whose default keeps today's behaviour can join the current format. Anything that changes what an existing definition means needs a new format number.
+      options:
+        - "Additive: existing definitions keep their meaning"
+        - "Breaking: needs a new format number"
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: conformance
+    attributes:
+      label: Conformance cases
+      description: The cases that would pin the change. For each, the script of outcomes and the transitions you expect.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: The change keeps guards a fixed expression language, and lets host behaviour in only by registered name.
+          required: true
+        - label: This proposal holds no private prompts, transcripts or secrets.
+          required: true
+        - label: I searched the existing issues and discussions, and this one is new.
+          required: true
