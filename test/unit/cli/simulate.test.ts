@@ -160,12 +160,77 @@ describe("sekaisen simulate", () => {
     expect(
       (await cli("simulate", FILE, "--script", HAPPY, "--nope")).code,
     ).toBe(2);
+    expect(
+      (await cli("simulate", FILE, "--script", HAPPY, "--explore")).code,
+    ).toBe(2);
+    expect(
+      (await cli("simulate", FILE, "--script", HAPPY, "--max-paths", "5")).code,
+    ).toBe(2);
+    for (const bad of [
+      ["--max-depth", "-1"],
+      ["--max-depth", "x"],
+      ["--max-paths", "0"],
+      ["--max-paths", "1.5"],
+    ]) {
+      expect((await cli("simulate", FILE, "--explore", ...bad)).code).toBe(2);
+    }
+  });
+
+  test("--explore prints the paths, the problems and the merged coverage; exit 0 when clean", async () => {
+    const r = await cli("simulate", FILE, "--explore");
+    expect(r.code).toBe(0);
+    expect(r.lines[0]).toMatch(/^explore: \d+ paths, 0 problems$/);
+    expect(r.lines.slice(1)).toEqual(["edges: 9/9"]);
+  });
+
+  test("--explore exits 1 on a problem and prints its path", async () => {
+    const r = await cli(
+      "simulate",
+      path.resolve("test/fixtures/defs/unbounded/pipeline.yaml"),
+      "--explore",
+    );
+    expect(r.code).toBe(1);
+    expect(r.lines[0]).toMatch(/^explore: \d+ paths, [1-9]\d* problems$/);
+    expect(r.lines).toContain("problem: step_limit: a:ok → b:bad → a:ok");
+    expect(r.lines.at(-1)).toBe("edges: 3/3");
+  });
+
+  test("--explore cut short by --max-paths warns and still exits 0", async () => {
+    const r = await cli("simulate", FILE, "--explore", "--max-paths", "2");
+    expect(r.code).toBe(0);
+    expect(r.lines.slice(0, 2)).toEqual([
+      "explore: 2 paths, 0 problems",
+      "explore: truncated at 2 paths",
+    ]);
+  });
+
+  test("--explore --json prints the result as JSON", async () => {
+    const r = await cli(
+      "simulate",
+      FILE,
+      "--explore",
+      "--max-depth",
+      "0",
+      "--json",
+    );
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out)).toEqual({
+      paths: 1,
+      truncated: false,
+      problems: [],
+      coverage: {
+        taken: ["draft.drafted", "check.pass", "publish.next"],
+        untaken: expect.any(Array),
+      },
+    });
   });
 
   test("simulate --help prints its usage and exits 0", async () => {
     const r = await cli("simulate", "--help");
     expect(r.code).toBe(0);
-    expect(r.out).toContain("sekaisen simulate <file> --script <yaml>");
+    expect(r.out).toContain(
+      "sekaisen simulate <file> (--script <yaml> | --explore [--max-depth N] [--max-paths N]) [--json]",
+    );
     expect((await cli("--help")).out).toContain("simulate <file> --script");
   });
 });

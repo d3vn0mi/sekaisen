@@ -1,0 +1,33 @@
+format: 1
+id: deploy-ungated
+title: A deploy the operator gate guards on one path only
+version: 1
+defaults:
+  deadline: 30m
+start: check
+stages:
+  check:
+    type: check
+    check: demo.ready
+    outcomes:
+      ready: release
+      unsure: review
+  review:
+    type: gate
+    who: operator
+    prompt: "Release anyway?"
+    timeout: 24h
+    on_timeout: { next: failed }
+    outcomes:
+      approve: { next: release }
+      reject: { next: failed }
+  release:
+    type: agent
+    agent: publisher
+    session: run
+    brief: briefs/release.md
+    deploys: true
+    outcomes:
+      released: { next: done }
+  done: { type: end, status: completed }
+  failed: { type: end, status: failed }

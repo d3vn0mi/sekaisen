@@ -430,6 +430,43 @@ stages:
     expect(r.problems).toEqual([expect.stringMatching(/^stalled/)]);
   });
 
+  test("decide answers what the script leaves open; stop ends the simulation", async () => {
+    const loaded = await fixLoop();
+    const seen: string[] = [];
+    const r = await simulate(
+      loaded,
+      parseScript(
+        "inputs: { topic: rust }\nstages:\n  draft: [ { outcome: drafted } ]",
+        loaded.def,
+      ),
+      {
+        decide: (d) => {
+          seen.push(
+            `${d.kind}:${d.stage}:${d.guard.count("draft", "drafted")}`,
+          );
+          if (d.stage === "check")
+            return { kind: "outcome", outcome: "pass", fields: {}, after: 0 };
+          d.stop();
+          return { kind: "action", ok: false };
+        },
+      },
+    );
+    // The scripted draft turn asks nothing; the check turn and the action do.
+    expect(seen).toEqual(["turn:check:1", "action:publish:1"]);
+    expect(events(r)).toContain("publish:turn_error");
+    expect(r.reachedEnd).toBe(false);
+    expect(r.problems).toEqual([expect.stringMatching(/^stopped:/)]);
+  });
+
+  test("an answer of the wrong kind is an error", async () => {
+    const loaded = await fixLoop();
+    await expect(
+      simulate(loaded, parseScript("inputs: { topic: rust }", loaded.def), {
+        decide: () => ({ kind: "check", outcome: "pass" }),
+      }),
+    ).rejects.toThrow("decide answered a turn at draft with a check");
+  });
+
   test("maxSteps bounds the ticks", async () => {
     const loaded = await fixLoop();
     const r = await simulate(

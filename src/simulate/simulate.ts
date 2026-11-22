@@ -1,16 +1,20 @@
 import { FakeAdapter } from "../adapter/fake.js";
 import type { StartTurn } from "../adapter/types.js";
+import { guardContext } from "../engine/advance.js";
 import { BRIEF_FOOTER } from "../engine/brief.js";
 import { VirtualClock } from "../engine/clock.js";
 import { Engine } from "../engine/engine.js";
 import type { LoadedDefinition } from "../format/load.js";
 import type { Definition } from "../format/types.js";
+import type { GuardContext } from "../guard/eval.js";
 import { createRegistry, type HostRegistry } from "../host/registry.js";
 import { openSqliteStore } from "../store/sqlite.js";
 import type {
   RunStatus,
   StageRunRow,
   Store,
+  StoreTx,
+  SyncResult,
   TransitionRow,
 } from "../store/types.js";
 import {
@@ -29,6 +33,36 @@ import {
 
 export type { TransitionLogLine } from "./coverage.js";
 
+/**
+ * A choice the script leaves open, offered to `SimulateOptions.decide`: an
+ * agent turn started (`turn`), an operator gate opened (`gate`), a polling
+ * gate polled for the first time in an opening (`poll`; the answer holds
+ * for every poll of that opening), or a check or an action called.
+ */
+export interface Decision {
+  kind: "turn" | "gate" | "poll" | "check" | "action";
+  stage: string;
+  stageRunId: string;
+  /** 0 for the first attempt of a visit, plus one per retry. */
+  retryIndex: number;
+  /** Turns dispatched on this attempt so far. */
+  turnsUsed: number;
+  /** What the run's guards read at this moment. */
+  guard: GuardContext;
+  /** Ends the simulation once this decision is answered; the result then carries a `stopped` problem. */
+  stop(): void;
+}
+
+/**
+ * How a decision goes: a visit for a turn or a gate, else a check's
+ * outcome, whether an action succeeds, whether a polled fact holds.
+ */
+export type Answer =
+  | Visit
+  | { kind: "check"; outcome: string }
+  | { kind: "action"; ok: boolean }
+  | { kind: "poll"; holds: boolean };
+
 export interface SimulationResult {
   status: RunStatus;
   /** True when the run ended on one of the definition's `end` stages. */
@@ -38,7 +72,8 @@ export interface SimulationResult {
   coverage: Coverage;
   /**
    * What kept the simulation from running as scripted: `stalled` (nothing
-   * is due and the run has not ended), `max_steps`, `completion_refused`.
+   * is due and the run has not ended), `max_steps`, `completion_refused`,
+   * `stopped` (a decision asked to stop).
    */
   problems: string[];
   /**
@@ -54,6 +89,11 @@ export interface SimulationResult {
 export interface SimulateOptions {
   /** Most ticks before the simulation gives up; 1000 by default. */
   maxSteps?: number;
+  /**
+   * Answers each decision the script has no entry for; undefined keeps the
+   * default (the first outcome, success, a fact that holds).
+   */
+  decide?: (d: Decision) => Answer | undefined;
 }
 
 /** Who the simulator's own transitions (start, gate answers) name. */
@@ -85,7 +125,7 @@ export async function simulate(
   }
   const store = openSqliteStore(":memory:");
   try {
-    return await new Simulation(loaded, script, store).run(
+    return await new Simulation(loaded, script, store, opts.decide).run(
       opts.maxSteps ?? DEFAULT_MAX_STEPS,
     );
   } finally {
@@ -147,11 +187,15 @@ class Simulation {
   private readonly gatesTaken = new Set<string>();
   private readonly problems: string[] = [];
   private readonly notes: string[] = [];
+  /** Whether a polled fact holds, by stage run, once a decision said so. */
+  private readonly polls = new Map<string, boolean>();
+  private stopRequested = false;
 
   constructor(
     private readonly loaded: LoadedDefinition,
     private readonly script: Script,
     private readonly store: Store,
+    private readonly decide: SimulateOptions["decide"],
   ) {
     this.def = loaded.def;
     this.registry = this.hostFunctions();
@@ -166,6 +210,10 @@ class Simulation {
     );
     let steps = 0;
     while (!this.ended(runId)) {
+      if (this.stopRequested) {
+        this.problems.push("stopped: a decision ended the simulation");
+        break;
+      }
       if (steps >= maxSteps) {
         this.problems.push(
           `max_steps: the run did not end within ${maxSteps} ticks`,
@@ -204,13 +252,18 @@ class Simulation {
     });
   }
 
-  /** Checks, actions and facts for every name the definition calls, answering from the script. */
+  /**
+   * Checks, actions and facts for every name the definition calls,
+   * answering from the script, then from `decide`, then by default.
+   */
   private hostFunctions(): HostRegistry {
     const registry = createRegistry();
     for (const name of hostNames(this.def, "check")) {
       registry.checks.set(name, async (ctx) => {
         const scripted = this.nextOf(`check:${name}`, this.script.checks[name]);
         if (scripted !== undefined) return scripted;
+        const decided = this.decided("check", ctx.runId, ctx.stage);
+        if (decided !== undefined) return decided.outcome;
         const stage = this.def.stages[ctx.stage];
         return stage?.type === "check"
           ? (Object.keys(stage.outcomes)[0] ?? "")
@@ -218,22 +271,97 @@ class Simulation {
       });
     }
     for (const name of hostNames(this.def, "action")) {
-      registry.actions.set(name, async () => {
-        const scripted = this.nextOf(
-          `action:${name}`,
-          this.script.actions[name],
-        );
+      registry.actions.set(name, async (ctx) => {
+        const scripted =
+          this.nextOf(`action:${name}`, this.script.actions[name]) ??
+          (this.decided("action", ctx.runId, ctx.stage)?.ok === false
+            ? "fail"
+            : "ok");
         if (scripted === "fail") throw new Error(`action ${name} failed`);
       });
     }
     for (const name of hostNames(this.def, "fact")) {
-      registry.facts.set(
-        name,
-        async () =>
-          this.nextOf(`fact:${name}`, this.script.facts[name]) ?? true,
-      );
+      registry.facts.set(name, async (ctx) => {
+        const scripted = this.nextOf(`fact:${name}`, this.script.facts[name]);
+        if (scripted !== undefined) return scripted;
+        const row = this.liveRow(ctx.runId, ctx.stage);
+        if (row === undefined) return true;
+        let holds = this.polls.get(row.stageRunId);
+        if (holds === undefined) {
+          holds =
+            this.decided("poll", ctx.runId, ctx.stage, row)?.holds ?? true;
+          this.polls.set(row.stageRunId, holds);
+        }
+        return holds;
+      });
     }
     return registry;
+  }
+
+  /** The live stage run of `stage` in the run, if any. */
+  private liveRow(runId: string, stage: string): StageRunRow | undefined {
+    return this.store.tx((t) =>
+      t
+        .listStageRuns({ state: [...LIVE], limit: 1000 })
+        .find((row) => row.runId === runId && row.stage === stage),
+    );
+  }
+
+  /**
+   * Asks `decide` how a decision goes. Undefined without `decide`, when it
+   * keeps the default, or when the stage run is gone; throws when it
+   * answers with the wrong kind.
+   */
+  private decided<K extends "check" | "action" | "poll">(
+    kind: K,
+    runId: string,
+    stage: string,
+    row = this.liveRow(runId, stage),
+  ): Extract<Answer, { kind: K }> | undefined {
+    const answer = this.ask(kind, row);
+    if (answer === undefined) return undefined;
+    if (answer.kind !== kind) {
+      throw new Error(
+        `decide answered a ${kind} at ${stage} with a ${answer.kind}`,
+      );
+    }
+    return answer as Extract<Answer, { kind: K }>;
+  }
+
+  private ask(
+    kind: Decision["kind"],
+    row: StageRunRow | undefined,
+  ): Answer | undefined {
+    if (this.decide === undefined || row === undefined) return undefined;
+    return this.decide({
+      kind,
+      stage: row.stage,
+      stageRunId: row.stageRunId,
+      retryIndex: row.retryIndex,
+      turnsUsed: row.turnsUsed,
+      guard: this.guardView(row.runId),
+      stop: () => {
+        this.stopRequested = true;
+      },
+    });
+  }
+
+  /** The run's guard view, each read in a transaction of its own. */
+  private guardView(runId: string): GuardContext {
+    const inTx = (t: StoreTx): GuardContext => {
+      const run = t.getRun(runId);
+      if (!run) throw new Error(`unknown run ${runId}`);
+      return guardContext(t, run);
+    };
+    return {
+      count: (stage, outcome) =>
+        this.store.tx((t) => inTx(t).count(stage, outcome)),
+      attempts: (stage) => this.store.tx((t) => inTx(t).attempts(stage)),
+      field: (stage, name) =>
+        this.store.tx((t) => inTx(t).field(stage, name) as SyncResult<unknown>),
+      input: (path) =>
+        this.store.tx((t) => inTx(t).input(path) as SyncResult<unknown>),
+    };
   }
 
   /** The next unused entry of a scripted list, or undefined once it runs out. */
@@ -244,16 +372,28 @@ class Simulation {
   }
 
   /**
-   * The stage's next visit, or its default: the first outcome, at once,
-   * with the smallest fields its schema accepts.
+   * The stage run's next visit: scripted, decided, or the default (the
+   * first outcome, at once, with the smallest fields its schema accepts).
    */
-  private visitOf(stageId: string): Visit {
+  private visitOf(row: StageRunRow): Visit {
     const scripted = this.nextOf(
-      `stage:${stageId}`,
-      this.script.stages[stageId],
+      `stage:${row.stage}`,
+      this.script.stages[row.stage],
     );
     if (scripted) return scripted;
-    return defaultVisit(this.def, stageId);
+    const gate = this.def.stages[row.stage]?.type === "gate";
+    const answer = this.ask(gate ? "gate" : "turn", row);
+    if (answer === undefined) return defaultVisit(this.def, row.stage);
+    const fits = gate
+      ? answer.kind === "resolve" ||
+        (answer.kind === "ending" && answer.ending === "timeout")
+      : answer.kind === "outcome" || answer.kind === "ending";
+    if (!fits) {
+      throw new Error(
+        `decide answered a ${gate ? "gate" : "turn"} at ${row.stage} with a ${answer.kind}`,
+      );
+    }
+    return answer as Visit;
   }
 
   /** Gives each turn started and each operator gate opened since the last step its scripted answer. */
@@ -267,7 +407,7 @@ class Simulation {
     for (const turn of this.adapter.newTurns.slice(this.turnsTaken)) {
       const row = live.find((r) => r.adapterRunId === turn.runId);
       if (!row) continue;
-      const visit = this.visitOf(row.stage);
+      const visit = this.visitOf(row);
       // A turn scripted to time out is left running until its deadline.
       if (!isPlayed(visit)) continue;
       this.pending.push({
@@ -289,7 +429,7 @@ class Simulation {
         continue;
       }
       this.gatesTaken.add(row.stageRunId);
-      const visit = this.visitOf(row.stage);
+      const visit = this.visitOf(row);
       // A gate scripted to time out is never answered.
       if (visit.kind !== "resolve") continue;
       this.pending.push({
