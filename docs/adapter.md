@@ -177,13 +177,15 @@ stage_progress({ token, note })
 
 `stage_complete` takes the completion token from the brief, one of the outcomes the stage declares,
 that outcome's `fields` (an object; leave out when the outcome declares none) and, optionally,
-`artifacts`: a list of strings naming where large results live. The engine checks, in this order:
+`artifacts`: a list of at most 64 strings, of at most 1024 characters each, naming where large
+results live. The engine checks, in this order:
 
 1. the token belongs to a live attempt of a stage run;
 2. the caller is the agent the stage was dispatched to, when the harness reports the caller (pass it
    as `callerAgent`);
 3. the outcome is one the stage declares;
-4. `fields` is an object under 64 KiB that validates against the outcome's schema.
+4. `fields` is an object that validates against the outcome's schema, and `fields` and
+   `artifacts` together are at most 64 KiB as JSON.
 
 On success the transition is committed and the run advances at once. On failure the result is a
 precise error (it names the declared outcomes, the missing field and so on) and nothing changes, so

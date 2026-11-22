@@ -297,6 +297,62 @@ describe("stage_complete", () => {
     expect(r.engine.status(runId).live?.state).toBe("working");
   });
 
+  it("artifacts are bounded: at most 64, each at most 1024 characters, all strings", async () => {
+    const r = await make();
+    const { runId, token } = await started(r);
+    const base = { token, outcome: "drafted", fields: { pr_url: "u" } };
+    const cases: Array<[unknown, RegExp]> = [
+      [
+        Array.from({ length: 65 }, (_, i) => `a${i}`),
+        /^artifacts has 65 items; at most 64 are allowed/,
+      ],
+      [
+        ["ok", "y".repeat(1025)],
+        /^artifacts\[1\] is 1025 characters long; at most 1024 are allowed/,
+      ],
+      [["ok", 3], /^artifacts must be a list of strings/],
+      ["one", /^artifacts must be a list of strings/],
+    ];
+    for (const [artifacts, error] of cases) {
+      const result = await r.engine.complete({
+        ...base,
+        artifacts: artifacts as string[],
+      });
+      expect(result).toEqual({
+        ok: false,
+        error: expect.stringMatching(error),
+      });
+    }
+    expect(r.engine.status(runId).live?.state).toBe("working");
+  });
+
+  it("fields and artifacts share the 64 KiB budget", async () => {
+    const r = await make();
+    const { runId, token } = await started(r);
+    const base = { token, outcome: "drafted", fields: { pr_url: "u" } };
+    const over = await r.engine.complete({
+      ...base,
+      artifacts: Array.from({ length: 64 }, () => "z".repeat(1024)),
+    });
+    expect(over).toEqual({
+      ok: false,
+      error: expect.stringMatching(
+        /^fields and artifacts together are larger than 64 KiB/,
+      ),
+    });
+    expect(r.engine.status(runId).live?.state).toBe("working");
+    const artifacts = Array.from({ length: 64 }, () => "z".repeat(1000));
+    expect(await r.engine.complete({ ...base, artifacts })).toEqual({
+      ok: true,
+      next: "check",
+      applied: "now",
+    });
+    const done = r.engine
+      .status(runId)
+      .transitions.find((t) => t.event === "stage_completed");
+    expect(done?.detail).toEqual({ artifacts, next: "check" });
+  });
+
   it("fields that fail the outcome's schema are refused with the declared fields", async () => {
     const r = await make();
     const { token } = await started(r);

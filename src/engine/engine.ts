@@ -41,6 +41,7 @@ import {
   byToken,
   type CompleteParams,
   type CompletionResult,
+  checkArtifacts,
   checkFields,
   fail,
   MAX_NOTE_BYTES,
@@ -81,6 +82,8 @@ export type { Timers } from "./calls.js";
 export {
   type CompleteParams,
   type CompletionResult,
+  MAX_ARTIFACT_CHARS,
+  MAX_ARTIFACTS,
   MAX_FIELDS_BYTES,
   MAX_NOTE_BYTES,
 } from "./completion.js";
@@ -348,6 +351,8 @@ export class Engine {
     if (typeof p.outcome !== "string" || p.outcome === "") {
       return fail("outcome is required");
     }
+    const badArtifacts = checkArtifacts(p.artifacts);
+    if (badArtifacts) return fail(badArtifacts);
     return this.commit((t, emit) => {
       const found = byToken(
         t,
@@ -367,7 +372,12 @@ export class Engine {
         );
       }
       const fields = p.fields === undefined ? {} : p.fields;
-      const invalid = checkFields(p.outcome, outcome.fields, fields);
+      const invalid = checkFields(
+        p.outcome,
+        outcome.fields,
+        fields,
+        p.artifacts,
+      );
       if (invalid) return fail(invalid);
 
       const ctx = this.ctx(t, run, emit);

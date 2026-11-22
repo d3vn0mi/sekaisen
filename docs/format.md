@@ -377,7 +377,8 @@ An agent reports through two tools.
 failure is returned to the agent as a tool error while its turn is still alive, so it can call
 again:
 
-1. `token` and `outcome` are given.
+1. `token` and `outcome` are given, and `artifacts`, when given, is a list of at most 64 strings
+   of at most 1024 characters each.
 2. The token is known: it was handed to an attempt of an agent stage.
 3. Its attempt has not ended. A token of an attempt that failed (an earlier attempt, after a
    retry), was canceled, or whose deadline has passed (even before the engine has recorded the
@@ -388,11 +389,11 @@ again:
    other call is refused.
 6. The run is still working.
 7. The outcome is one the stage declares.
-8. `fields` (default `{}`) is an object, at most 64 KiB as JSON, and valid for the outcome. An
-   outcome without `fields` accepts only `{}`.
+8. `fields` (default `{}`) is an object, valid for the outcome, and at most 64 KiB as JSON
+   together with `artifacts`. An outcome without `fields` accepts only `{}`.
 
 Then, in one transaction, the attempt completes and the run follows the outcome's `next`.
-`artifacts` is an optional list of strings recorded with the transition.
+`artifacts` names where large results live; it is recorded with the transition.
 
 ### stage_progress
 

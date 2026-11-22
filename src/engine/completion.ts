@@ -25,8 +25,12 @@ export type CompletionResult =
   | { ok: true; next: string | null; applied: "now" | "already" }
   | { ok: false; error: string };
 
-/** Largest `fields` object a completion may carry, as JSON. */
+/** Largest `fields` object and `artifacts` list a completion may carry, together, as JSON. */
 export const MAX_FIELDS_BYTES = 64 * 1024;
+/** Most artifacts one completion may name. */
+export const MAX_ARTIFACTS = 64;
+/** Longest artifact, in characters: it names where a result lives. */
+export const MAX_ARTIFACT_CHARS = 1024;
 /** Largest progress note. */
 export const MAX_NOTE_BYTES = 64 * 1024;
 
@@ -136,17 +140,47 @@ export function repeated(
   };
 }
 
-/** The problem with `fields` for `outcome`, or undefined when they are acceptable. */
+/** The problem with a completion's `artifacts`, or undefined when they are acceptable. */
+export function checkArtifacts(artifacts: unknown): string | undefined {
+  if (artifacts === undefined) return undefined;
+  if (
+    !Array.isArray(artifacts) ||
+    !artifacts.every((a) => typeof a === "string")
+  ) {
+    return "artifacts must be a list of strings, each naming where a result lives";
+  }
+  if (artifacts.length > MAX_ARTIFACTS) {
+    return `artifacts has ${artifacts.length} items; at most ${MAX_ARTIFACTS} are allowed`;
+  }
+  const long = artifacts.findIndex((a) => a.length > MAX_ARTIFACT_CHARS);
+  if (long >= 0) {
+    return `artifacts[${long}] is ${artifacts[long]?.length} characters long; at most ${MAX_ARTIFACT_CHARS} are allowed. An artifact names where a result lives, not the result itself`;
+  }
+  return undefined;
+}
+
+/**
+ * The problem with `fields` for `outcome`, or undefined when they are
+ * acceptable. `artifacts` count toward the size budget.
+ */
 export function checkFields(
   outcome: string,
   schema: JsonSchema | undefined,
   fields: unknown,
+  artifacts?: string[],
 ): string | undefined {
   if (!isPlainObject(fields)) {
     return `fields must be an object; outcome ${outcome} takes ${fieldsShorthand(schema)}`;
   }
-  if (Buffer.byteLength(JSON.stringify(fields)) > MAX_FIELDS_BYTES) {
-    return `fields are larger than 64 KiB; put large content in an artifact and pass its location. Outcome ${outcome} takes ${fieldsShorthand(schema)}`;
+  const size =
+    Buffer.byteLength(JSON.stringify(fields)) +
+    (artifacts === undefined
+      ? 0
+      : Buffer.byteLength(JSON.stringify(artifacts)));
+  if (size > MAX_FIELDS_BYTES) {
+    return artifacts === undefined
+      ? `fields are larger than 64 KiB; put large content in an artifact and pass its location. Outcome ${outcome} takes ${fieldsShorthand(schema)}`
+      : `fields and artifacts together are larger than 64 KiB as JSON; keep large content out of the completion and pass its location. Outcome ${outcome} takes ${fieldsShorthand(schema)}`;
   }
   if (!schema) {
     return Object.keys(fields).length === 0
