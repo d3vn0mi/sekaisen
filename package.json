@@ -1,0 +1,51 @@
+{
+  "name": "sekaisen",
+  "version": "0.0.0",
+  "description": "A pipeline engine for AI agents.",
+  "license": "MIT",
+  "author": "d3vn0mi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/d3vn0mi/sekaisen.git"
+  },
+  "type": "module",
+  "bin": {
+    "sekaisen": "dist/cli/main.js",
+    "sekaisen-mcp": "dist/mcp/main.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/server.d.ts",
+      "default": "./dist/mcp/server.js"
+    }
+  },
+  "files": [
+    "dist",
+    "conformance",
+    "src/format/schema.json"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "biome check .",
+    "test": "vitest run",
+    "ci:local": "npm run typecheck && npm run lint && npm test && npm run build"
+  },
+  "dependencies": {
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.8",
+    "@types/node": "26.6.6",
+    "ajv": "8.20.0",
+    "typescript": "7.0.2",
+    "vitest": "5.1.1"
+  }
+}
