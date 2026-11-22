@@ -3,6 +3,7 @@ export type JsonSchema = {
   properties?: Record<string, JsonSchema>;
   required?: string[];
   additionalProperties?: boolean | JsonSchema;
+  propertyNames?: JsonSchema;
   items?: JsonSchema;
   enum?: unknown[];
   const?: unknown;
@@ -27,6 +28,7 @@ export const SUPPORTED_KEYWORDS: readonly string[] = [
   "properties",
   "required",
   "additionalProperties",
+  "propertyNames",
   "items",
   "enum",
   "const",
@@ -280,6 +282,10 @@ function walkSchema(
     if (!isObject(s.items)) bad("items", "a schema");
     walkSchema(s.items, `${path}/items`, root, depth + 1);
   }
+  if (s.propertyNames !== undefined) {
+    if (!isObject(s.propertyNames)) bad("propertyNames", "a schema");
+    walkSchema(s.propertyNames, `${path}/propertyNames`, root, depth + 1);
+  }
   const ap = s.additionalProperties;
   if (ap !== undefined && typeof ap !== "boolean") {
     walkSchema(ap, `${path}/additionalProperties`, root, depth + 1);
@@ -417,6 +423,13 @@ function check(
     }
     for (const [name, v] of Object.entries(value)) {
       const at = `${path}/${escapeSegment(name)}`;
+      if (schema.propertyNames) {
+        const sub: string[] = [];
+        check(schema.propertyNames, name, at, root, sub, depth + 1, []);
+        for (const e of sub) {
+          errors.push(`${at}: property name ${e.slice(at.length + 2)}`);
+        }
+      }
       if (Object.hasOwn(props, name)) {
         check(props[name] as JsonSchema, v, at, root, errors, depth + 1, []);
       } else if (schema.additionalProperties === false) {

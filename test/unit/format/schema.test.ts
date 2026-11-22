@@ -34,7 +34,11 @@ function keywordsOutside(schema: unknown, at: string): string[] {
       (value as unknown[]).forEach((sub, i) => {
         bad.push(...keywordsOutside(sub, `${at}/${key}/${i}`));
       });
-    } else if (key === "items" || key === "additionalProperties") {
+    } else if (
+      key === "items" ||
+      key === "additionalProperties" ||
+      key === "propertyNames"
+    ) {
       bad.push(...keywordsOutside(value, `${at}/${key}`));
     }
   }
@@ -75,6 +79,26 @@ describe("schema.json", () => {
       { ...good, stages: { s: { type: "agent", agent: "a" } } },
       { ...good, stages: { s: { type: "end", status: "paused" } } },
       { ...good, defaults: { deadline: "soon" } },
+      { ...good, id: "Review" },
+      { ...good, stages: { ...good.stages, "Not-an-id": good.stages.done } },
+      {
+        ...good,
+        stages: {
+          ...good.stages,
+          probe: {
+            type: "check",
+            check: "demo.probe",
+            outcomes: { OK: "done" },
+          },
+        },
+      },
+      {
+        ...good,
+        stages: {
+          ...good.stages,
+          draft: { ...good.stages.draft, agent: "drafter.bot" },
+        },
+      },
     ];
     for (const doc of broken) {
       expect(validateJson(schema, doc).length).toBeGreaterThan(0);

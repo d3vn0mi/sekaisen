@@ -307,6 +307,48 @@ describe("loadDefinition", () => {
     }
   });
 
+  test("ids and names follow the identifier rule", async () => {
+    const yaml = (await import("node:fs/promises")).readFile;
+    const original = await yaml(path.join(work, "pipeline.yaml"), "utf8");
+    const pattern = "^[a-z][a-z0-9_-]{0,63}$";
+    const cases: Array<[(y: string) => string, string]> = [
+      [(y) => y.replace("id: review-loop", "id: Review-Loop"), "/id"],
+      [
+        (y) => y.replace("agent: drafter", "agent: Drafter"),
+        "/stages/draft/agent",
+      ],
+      [
+        (y) => y.replace("  drafted:", "  Drafted:"),
+        "/stages/draft/outcomes/Drafted",
+      ],
+      [
+        (y) =>
+          y.replace(
+            "stages:\n",
+            "stages:\n  9lives: { type: end, status: completed }\n",
+          ),
+        "/stages/9lives",
+      ],
+      [(y) => y.replace("id: review-loop", `id: ${"a".repeat(65)}`), "/id"],
+    ];
+    for (const [edit, where] of cases) {
+      const file = await rewrite(() => edit(original));
+      const { problems } = await loadDefinition(file);
+      expect(problems).toContainEqual(
+        expect.stringMatching(
+          new RegExp(
+            `^${where.replaceAll("/", "\\/")}: (property name )?must match pattern \\^`,
+          ),
+        ),
+      );
+      expect(problems.join("\n")).toContain(pattern);
+    }
+    const ok = await rewrite(() =>
+      original.replace("id: review-loop", `id: r_2-${"x".repeat(60)}`),
+    );
+    expect((await loadDefinition(ok)).problems).toEqual([]);
+  });
+
   test("schema violations become problems with pointers", async () => {
     const file = await rewrite((y) =>
       y.replace("timeout: 24h", "timeout: tomorrow"),

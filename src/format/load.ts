@@ -332,9 +332,13 @@ function stageRules(id: string, stage: Raw): string[] {
 function schemaProblems(doc: Raw): string[] {
   const schema = definitionSchema();
   const defs = schema.$defs ?? {};
+  // Stages are validated one by one below, for errors that name the stage;
+  // their ids are still checked here.
+  const { additionalProperties: _, ...stagesShape } =
+    schema.properties?.stages ?? {};
   const top: JsonSchema = {
     ...schema,
-    properties: { ...schema.properties, stages: { type: "object" } },
+    properties: { ...schema.properties, stages: stagesShape },
   };
   const problems = validateJson(top, doc);
   const stages = isObject(doc.stages) ? doc.stages : {};

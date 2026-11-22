@@ -148,6 +148,25 @@ describe("validateJson", () => {
     expect(validateJson({ type: "object" }, null)).toHaveLength(1);
   });
 
+  test("propertyNames checks every key and names the one that fails", () => {
+    const schema: JsonSchema = {
+      type: "object",
+      propertyNames: { pattern: "^[a-z]+$", maxLength: 5 },
+    };
+    expect(validateJson(schema, { ok: 1, fine: 2 })).toEqual([]);
+    expect(validateJson(schema, { ok: 1, Bad: 2, toolong: 3 })).toEqual([
+      "/Bad: property name must match pattern ^[a-z]+$",
+      "/toolong: property name must have at most 5 characters",
+    ]);
+    expect(validateJson(schema, "not an object")).toEqual([": must be object"]);
+    expect(() =>
+      checkSchema({ propertyNames: { pattern: "(a+)+" } } as JsonSchema),
+    ).toThrow(/^\/propertyNames\/pattern: pattern has nested quantifiers/);
+    expect(() =>
+      checkSchema({ propertyNames: 3 } as unknown as JsonSchema),
+    ).toThrow(/^\/propertyNames: must be a schema/);
+  });
+
   test("annotation keywords are accepted", () => {
     expect(
       validateJson({ title: "t", description: "d", default: 1 }, 5),
@@ -160,6 +179,7 @@ describe("validateJson", () => {
       "properties",
       "required",
       "additionalProperties",
+      "propertyNames",
       "items",
       "enum",
       "const",

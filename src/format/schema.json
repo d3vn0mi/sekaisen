@@ -3,7 +3,7 @@
   "type": "object",
   "properties": {
     "format": { "const": 1 },
-    "id": { "type": "string", "minLength": 1 },
+    "id": { "$ref": "#/$defs/identifier" },
     "title": { "type": "string" },
     "version": { "type": "integer", "minimum": 0 },
     "inputs": { "type": "object" },
@@ -36,6 +36,7 @@
     "start": { "type": "string", "minLength": 1 },
     "stages": {
       "type": "object",
+      "propertyNames": { "$ref": "#/$defs/identifier" },
       "additionalProperties": { "$ref": "#/$defs/stage" }
     },
     "on_cancel": { "type": "string" }
@@ -43,6 +44,7 @@
   "required": ["format", "id", "version", "start", "stages"],
   "additionalProperties": false,
   "$defs": {
+    "identifier": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
     "duration": { "type": "string", "pattern": "^[0-9]+[smhd]$" },
     "retry": {
       "type": "object",
@@ -87,6 +89,7 @@
     },
     "outcomes": {
       "type": "object",
+      "propertyNames": { "$ref": "#/$defs/identifier" },
       "additionalProperties": { "$ref": "#/$defs/outcome" }
     },
     "stage": {
@@ -103,7 +106,7 @@
       "type": "object",
       "properties": {
         "type": { "const": "agent" },
-        "agent": { "type": "string", "minLength": 1 },
+        "agent": { "$ref": "#/$defs/identifier" },
         "session": { "enum": ["run", "project"] },
         "brief": { "type": "string", "minLength": 1 },
         "deadline": { "$ref": "#/$defs/duration" },
@@ -174,6 +177,7 @@
         "check": { "type": "string", "minLength": 1 },
         "outcomes": {
           "type": "object",
+          "propertyNames": { "$ref": "#/$defs/identifier" },
           "additionalProperties": { "type": "string", "minLength": 1 }
         }
       },

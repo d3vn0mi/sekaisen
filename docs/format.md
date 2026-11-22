@@ -14,6 +14,7 @@ runtime in any language must reproduce.
 - [Stage types](#stage-types)
 - [Outcomes and next](#outcomes-and-next)
 - [Defaults](#defaults)
+- [Identifiers](#identifiers)
 - [Reserved names](#reserved-names)
 - [Fields and the schema validator](#fields-and-the-schema-validator)
 - [Guards](#guards)
@@ -48,14 +49,14 @@ unknown key, at any level, is an error.
 | Field | Required | Type | Meaning |
 |---|---|---|---|
 | `format` | yes | `1` | The format version. A change to the format is a new number |
-| `id` | yes | string, not empty | The pipeline's id; runs are started by it |
+| `id` | yes | [identifier](#identifiers) | The pipeline's id; runs are started by it |
 | `version` | yes | integer ≥ 0 | A version the author bumps; the run also pins the file hash |
 | `title` | no | string | A human title |
 | `inputs` | no | JSON Schema | What a run's inputs must satisfy. Without it, inputs must be a mapping (empty by default) |
 | `defaults` | no | mapping | `deadline`, `retry` and `priority` for the stages and runs that give none, below |
 | `providers` | no | `fleet`, `subscription` or `{ allow: [string, …] }` (at least one) | Which providers the pipeline's turns may run on; `fleet` by default. See [usage limits](#usage-limits-and-provider-policy) |
 | `start` | yes | stage id | The stage a run enters first |
-| `stages` | yes | mapping of stage id to stage | The stages |
+| `stages` | yes | mapping of stage id ([identifier](#identifiers)) to stage | The stages |
 | `on_cancel` | no | stage id of an `action` stage | An action run once when the run is canceled. See [cancellation](#cancellation) |
 
 `defaults` takes:
@@ -85,7 +86,7 @@ report one of the stage's outcomes.
 | Key | Required | Type | Default | Meaning |
 |---|---|---|---|---|
 | `type` | yes | `agent` | | |
-| `agent` | yes | string | | The role; the harness adapter resolves it to an agent |
+| `agent` | yes | [identifier](#identifiers) | | The role; the harness adapter resolves it to an agent |
 | `brief` | yes | path | | The brief template, relative to the pipeline file |
 | `outcomes` | yes | mapping | | The outcomes the agent may report, each with `fields` and `next` |
 | `session` | no | `run` or `project` | `run` | Which session the turns run in. See [sessions](#sessions) |
@@ -130,7 +131,7 @@ outcomes at once.
 |---|---|---|---|
 | `type` | yes | `check` | |
 | `check` | yes | string | The host-registered check name |
-| `outcomes` | yes | mapping of outcome to stage id | Each outcome leads straight to a stage; no fields, no branches |
+| `outcomes` | yes | mapping of outcome ([identifier](#identifiers)) to stage id | Each outcome leads straight to a stage; no fields, no branches |
 
 ### action
 
@@ -214,6 +215,15 @@ What the engine fills in when the definition leaves a key out:
 Check, gate and wait stages never retry. A `retry` takes `max` (an integer ≥ 0, the retries per
 visit) and `on` (a list of `no_result`, `lost`, `timeout`, `turn_error`).
 
+## Identifiers
+
+The pipeline `id`, every stage id, every outcome name and every `agent` are identifiers: a lowercase
+letter, then at most 63 lowercase letters, digits, `_` or `-`, so they match
+`^[a-z][a-z0-9_-]{0,63}$`. `draft`, `fix-loop` and `step_2` are identifiers; `Draft`, `2nd` and
+`a.b` are not. They appear in session keys, idempotency keys, guards and placeholders, where a dot,
+a space or a capital would be ambiguous. The names of host-registered checks, actions and facts are
+not identifiers: they usually carry the host's prefix, as in `demo.notify`.
+
 ## Reserved names
 
 | Kind | Reserved | Why |
@@ -248,7 +258,7 @@ a schema never silently means less than it says.
 
 | Keywords | |
 |---|---|
-| Structure | `type`, `properties`, `required`, `additionalProperties` (boolean or schema), `items` |
+| Structure | `type`, `properties`, `required`, `additionalProperties` (boolean or schema), `propertyNames`, `items` |
 | Values | `enum`, `const`, `minimum`, `maximum`, `minLength`, `maxLength`, `pattern`, `minItems`, `maxItems` |
 | Composition | `oneOf`, `anyOf`, `$ref` (local `#/$defs/<name>` only), `$defs` |
 | Annotations | `description`, `title`, `default` (not applied) |
@@ -638,7 +648,7 @@ finding is an error, a warning or information.
 
 | Check | Verifies |
 |---|---|
-| Schema | The file is YAML and matches the format's JSON Schema; durations parse; field shorthand and schemas are valid; stage ids and outcome names are not [reserved](#reserved-names); a gate has exactly one of `who: operator` and `poll`, and a poll gate exactly one outcome; a wait has exactly one of `for` and `until`; an `allow` list names at least one provider; no reserved stage type |
+| Schema | The file is YAML and matches the format's JSON Schema; durations parse; field shorthand and schemas are valid; the pipeline id, stage ids, outcome names and agents are [identifiers](#identifiers); stage ids and outcome names are not [reserved](#reserved-names); a gate has exactly one of `who: operator` and `poll`, and a poll gate exactly one outcome; a wait has exactly one of `for` and `until`; an `allow` list names at least one provider; no reserved stage type |
 | References | `start`, `on_cancel` and every `next`, `on_exhausted` and `on_timeout` target exist; every guard parses, names existing stages, counts only declared outcomes and takes `attempts` only of agent or action stages; every check, action and fact is registered by the host; every brief exists; every placeholder names `inputs.<x>`, `run.id`, `stage.outcomes` or a field of an existing stage (a warning when that stage is not on every path to the one that reads it) |
 | Graph | Every stage is reachable from `start` (or from `on_cancel`); an end is reachable from every stage; every agent and gate stage has an outcome; every outcome has a `next`; the last branch has no guard. A stage that can fail counts as leading to its `on_exhausted` or the first `failed` end |
 | Termination | Every cycle in the graph is broken by an answered operator gate (one of its declared outcomes; a timeout edge does not count), or by an edge whose guard bounds a `count` or `attempts` term against an integer literal, where every way round the cycle passes what the term counts. Only bounds in the guard's top-level `and` count; under `or` or `not` a term bounds nothing |
