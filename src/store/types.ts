@@ -90,6 +90,12 @@ export interface StageRunRow {
    * is in flight, or once the engine has read that turn's end.
    */
   dispatchedAt: number | null;
+  /**
+   * When a provider or policy pause began holding this submitted stage run;
+   * null when nothing holds it. The held span is added to the deadline on
+   * release.
+   */
+  heldSince: number | null;
   runtime: RuntimeInfo | null;
   waitReason: string | null;
 }
@@ -202,6 +208,7 @@ export interface StoreTx {
 
   /** Limits still in force at `now`. */
   listLimits(now: number): LimitRow[];
+  /** Upserts a limit; a pause in force is never shortened (the later end wins). */
   putLimit(row: LimitRow): void;
   clearLimit(scope: string, key: string): void;
 

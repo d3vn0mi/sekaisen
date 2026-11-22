@@ -20,6 +20,8 @@ const RESET_PHRASE = /resets (.+)$/m;
 
 /** How long a pause lasts when the refusal gives no usable reset time. */
 export const DEFAULT_PAUSE_MS = 3_600_000;
+/** How long a pause lasts when the reset it names passed within the hour. */
+export const RESET_GRACE_MS = 300_000;
 
 /** The refusal line in an error, if the error carries one. */
 export function refusalLine(error: string | undefined): string | undefined {
@@ -52,14 +54,19 @@ export function classifyEnding(
  * refusal: an ISO instant with a zone (`2026-11-22T18:00:00Z`), a time of
  * day (`7pm`, `7:30pm`; its next occurrence), or a date and time
  * (`Nov 1, 7pm`; the nearest such date). A time zone may follow in
- * parentheses (`(Europe/Berlin)`); UTC without one. Anything unreadable, or
- * an instant that is not after `now`, gives `now` plus one hour.
+ * parentheses (`(Europe/Berlin)`); UTC without one. A reset that passed
+ * within the last hour is about to take effect: five minutes. Anything
+ * unreadable, or a reset further in the past, gives `now` plus one hour.
  */
 export function parseReset(error: string, now: number): number {
   const source = refusalLine(error) ?? error;
   const phrase = RESET_PHRASE.exec(source)?.[1];
   const at = phrase === undefined ? undefined : readPhrase(phrase, now);
-  return at !== undefined && at > now ? at : now + DEFAULT_PAUSE_MS;
+  if (at === undefined || Number.isNaN(at)) return now + DEFAULT_PAUSE_MS;
+  if (at > now) return at;
+  return now - at <= DEFAULT_PAUSE_MS
+    ? now + RESET_GRACE_MS
+    : now + DEFAULT_PAUSE_MS;
 }
 
 const ISO_INSTANT =
@@ -133,10 +140,14 @@ function clock(
   return { hour: (hour12 % 12) + (pm ? 12 : 0), minute };
 }
 
-/** The first instant after `now` at which the wall clock in `zone` reads `time`. */
+/**
+ * When the wall clock in `zone` reads `time`: its last occurrence when that
+ * was within the hour (the reset is just taking effect), else its next.
+ */
 function nextTimeOfDay(time: Time, zone: string, now: number): number {
   const today = wallClock(now, zone);
-  for (let days = 0; days <= 2; days++) {
+  let last = Number.NaN;
+  for (let days = -1; days <= 2; days++) {
     const at = fromWallClock(
       today.year,
       today.month,
@@ -144,7 +155,11 @@ function nextTimeOfDay(time: Time, zone: string, now: number): number {
       time,
       zone,
     );
-    if (at > now) return at;
+    if (at <= now) {
+      last = at;
+      continue;
+    }
+    return now - last <= DEFAULT_PAUSE_MS ? last : at;
   }
   return Number.NaN;
 }

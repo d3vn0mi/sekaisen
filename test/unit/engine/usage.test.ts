@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { parseReset } from "../../../src/engine/classify.js";
+import type {
+  AgentStage,
+  Definition,
+  ProviderPolicy,
+} from "../../../src/format/types.js";
 import type { StageRunRow, Store } from "../../../src/store/types.js";
 import {
   lastToken,
@@ -41,6 +46,52 @@ const rows = (store: Store, runId: string): StageRunRow[] =>
 
 const limits = (r: Rig) => r.store.tx((t) => t.listLimits(r.clock.now()));
 
+const MIN = 60_000;
+
+const live = (r: Rig, runId: string) => r.engine.status(runId).live;
+
+const eventsOf = (r: Rig, runId: string) =>
+  r.store.tx((t) => t.transitions(runId).map((x) => x.event));
+
+function agent(def: Definition, id: string): AgentStage {
+  const stage = def.stages[id];
+  if (stage?.type !== "agent") throw new Error("fixture changed");
+  return stage;
+}
+
+/** Registers a copy of the review loop as pipeline `id` under `providers`. */
+async function pipeline(
+  r: Rig,
+  id: string,
+  providers: ProviderPolicy,
+  edit: (def: Definition) => void = () => {},
+): Promise<void> {
+  r.source.defs.set(
+    id,
+    await variant(`h-${id}`, (def) => {
+      def.id = id;
+      def.providers = providers;
+      edit(def);
+    }),
+  );
+}
+
+/** Starts a run of `id` and dispatches it; its token and harness run id. */
+async function startedOn(
+  r: Rig,
+  id: string,
+): Promise<{ runId: string; token: string; adapterRunId: string }> {
+  const { runId } = await r.engine.startRun(id, { topic: "t" });
+  await r.engine.tick();
+  const row = live(r, runId);
+  const call = r.adapter.calls.findLast((c) => c.sessionKey.includes(runId));
+  return {
+    runId,
+    token: call ? tokenOf(call.message) : "",
+    adapterRunId: row?.adapterRunId ?? "",
+  };
+}
+
 describe("parseReset", () => {
   const at = (iso: string) => Date.parse(iso);
 
@@ -57,9 +108,9 @@ describe("parseReset", () => {
     expect(parseReset("You've hit your limit · resets 7pm", NOW)).toBe(
       at("2026-11-22T19:00:00Z"),
     );
-    // 11am has already passed today: tomorrow.
-    expect(parseReset("You've hit your limit · resets 11am", NOW)).toBe(
-      at("2026-11-23T11:00:00Z"),
+    // 10am passed two hours ago: tomorrow.
+    expect(parseReset("You've hit your limit · resets 10am", NOW)).toBe(
+      at("2026-11-23T10:00:00Z"),
     );
     expect(parseReset("resets 12:30pm", NOW)).toBe(at("2026-11-22T12:30:00Z"));
     expect(parseReset("resets 12am", NOW)).toBe(at("2026-11-23T00:00:00Z"));
@@ -70,8 +121,8 @@ describe("parseReset", () => {
     expect(parseReset("resets 7:30pm (Europe/Berlin)", NOW)).toBe(
       at("2026-11-22T18:30:00Z"),
     );
-    expect(parseReset("resets 1pm (Europe/Berlin)", NOW)).toBe(
-      at("2026-11-23T12:00:00Z"),
+    expect(parseReset("resets 11am (Europe/Berlin)", NOW)).toBe(
+      at("2026-11-23T10:00:00Z"),
     );
     // Across a daylight-saving change: New York is UTC-4 now but UTC-5
     // after 2am on 2026-11-01.
@@ -105,6 +156,25 @@ describe("parseReset", () => {
     ).toBe(at("2027-07-04T04:00:00Z"));
   });
 
+  it("a reset that passed within the hour pauses five minutes", () => {
+    const FIVE_MIN = 300_000;
+    // Exactly at the reset instant, and four seconds after it.
+    expect(parseReset("resets 12pm", NOW)).toBe(NOW + FIVE_MIN);
+    expect(parseReset("resets 12pm", NOW + 4000)).toBe(NOW + 4000 + FIVE_MIN);
+    expect(parseReset("resets 1pm (Europe/Berlin)", NOW)).toBe(NOW + FIVE_MIN);
+    // One hour is the edge of the grace; past it, the next day's reset.
+    expect(parseReset("resets 11am", NOW)).toBe(NOW + FIVE_MIN);
+    expect(parseReset("resets 11am", NOW + 1)).toBe(at("2026-11-23T11:00:00Z"));
+    // Yesterday's 11:59pm read just after midnight.
+    const night = at("2026-11-23T00:20:00Z");
+    expect(parseReset("resets 11:59pm", night)).toBe(night + FIVE_MIN);
+    // Dated forms get the same grace.
+    expect(parseReset("resets 2026-11-22T11:59:56Z", NOW)).toBe(NOW + FIVE_MIN);
+    expect(parseReset("resets Nov 22, 12pm (UTC)", NOW + 4000)).toBe(
+      NOW + 4000 + FIVE_MIN,
+    );
+  });
+
   it("takes the phrase from the refusal line of a longer error", () => {
     const error =
       "turn failed\nYou've hit your usage limit · resets 9pm\nretrying never resets anything";
@@ -123,7 +193,7 @@ describe("parseReset", () => {
       "resets 2026-11-22T18:00:00",
       // A date already well past is stale, not a year away.
       "resets Nov 1, 7pm (Europe/Berlin)",
-      "resets 2026-11-22T11:00:00Z",
+      "resets 2026-11-22T10:00:00Z",
     ]) {
       expect(parseReset(error, NOW), error).toBe(NOW + HOUR);
     }
@@ -308,12 +378,12 @@ describe("usage limits", () => {
       runtime: { provider: "metered-key", model: "m2" },
     });
     expect(limits(r)).toMatchObject([
-      { scope: "provider", key: "included", pausedUntil: NOW + HOUR },
+      { scope: "policy", key: "included", pausedUntil: NOW + HOUR },
     ]);
     expect(check).toMatchObject({
       stage: "check",
       state: "submitted",
-      waitReason: "paused:provider:included",
+      waitReason: "paused:policy:included",
     });
     expect(r.adapter.calls).toHaveLength(1);
     const ended = r.engine
@@ -322,7 +392,7 @@ describe("usage limits", () => {
     expect(ended?.detail).toMatchObject({
       provider: "metered-key",
       degraded: true,
-      paused: "provider:included",
+      paused: "policy:included",
     });
 
     r.clock.advance(HOUR);
@@ -331,6 +401,7 @@ describe("usage limits", () => {
     expect(rows(r.store, runId)[1]).toMatchObject({
       state: "working",
       waitReason: null,
+      heldSince: null,
     });
   });
 
@@ -352,14 +423,9 @@ describe("usage limits", () => {
     expect(limits(r)).toEqual([]);
   });
 
-  it("an allow list pauses on a turn outside it", async () => {
+  it("an allow list pauses its policy on a turn outside it, without a retry", async () => {
     const r = await make();
-    r.source.defs.set(
-      "review-loop",
-      await variant("allow", (def) => {
-        def.providers = { allow: ["included", "key-1"] };
-      }),
-    );
+    await pipeline(r, "review-loop", { allow: ["key-1", "included", "key-1"] });
     const { runId } = await started(r);
     r.adapter.setOutcome("fr_1", {
       state: "ended",
@@ -368,14 +434,201 @@ describe("usage limits", () => {
     });
     await r.engine.tick();
     expect(limits(r)).toEqual([]);
-    // The no_result retry runs and lands on a provider outside the list.
+    // The no_result retry runs and lands on a provider outside the list,
+    // without completing: usage_limited, so the last retry is not spent.
     r.adapter.setOutcome("fr_2", {
       state: "ended",
       ending: "ok",
       runtime: { provider: "key-2", model: "m" },
     });
     await r.engine.tick();
-    expect(limits(r)).toMatchObject([{ key: "included" }]);
-    expect(r.engine.status(runId).run.status).toBe("failed");
+    expect(limits(r)).toMatchObject([
+      { scope: "policy", key: "included,key-1", pausedUntil: NOW + HOUR },
+    ]);
+    const all = rows(r.store, runId);
+    expect(all).toHaveLength(2);
+    expect(all[1]).toMatchObject({
+      state: "submitted",
+      retryIndex: 1,
+      waitReason: "paused:policy:included,key-1",
+      turnsUsed: 0,
+    });
+    expect(r.engine.status(runId).run.status).toBe("working");
+    const ending = r.engine
+      .status(runId)
+      .transitions.filter((x) => x.event === "usage_limited");
+    expect(ending.map((x) => x.detail)).toMatchObject([
+      { policy: "included,key-1", until: NOW + HOUR, degraded: true },
+    ]);
+  });
+
+  it("a degraded turn with a fresh note continues once the policy is released", async () => {
+    const r = await make();
+    await pipeline(r, "review-loop", "subscription", (def) => {
+      agent(def, "draft").turns.max = 2;
+    });
+    const { runId, token } = await started(r);
+    await r.engine.progress({ token, note: "half done" });
+    r.adapter.setOutcome("fr_1", {
+      state: "ended",
+      ending: "ok",
+      runtime: { provider: "metered-key", model: "m2" },
+    });
+    await r.engine.tick();
+    let [row, ...others] = rows(r.store, runId);
+    expect(others).toEqual([]);
+    expect(row).toMatchObject({
+      state: "submitted",
+      retryIndex: 0,
+      turnsUsed: 1,
+      waitReason: "paused:policy:included",
+      heldSince: NOW,
+    });
+    expect(r.adapter.calls).toHaveLength(1);
+
+    r.clock.advance(HOUR);
+    await r.engine.tick();
+    expect(r.adapter.calls).toHaveLength(2);
+    const next = r.adapter.calls[1];
+    expect(next?.idempotencyKey).toBe(`${runId}:draft:1:2`);
+    expect(next?.message).toContain("half done");
+    expect(tokenOf(next?.message ?? "")).toBe(token);
+    [row] = rows(r.store, runId);
+    expect(row).toMatchObject({ state: "working", turnsUsed: 2 });
+  });
+});
+
+describe("limits across pipelines", () => {
+  it("a degraded turn pauses its policy and never a fleet pipeline", async () => {
+    const r = await make();
+    await pipeline(r, "sub", "subscription");
+    await pipeline(r, "fleet", "fleet");
+    await pipeline(r, "same-set", { allow: ["included"] });
+    await pipeline(r, "other-set", { allow: ["key-1"] });
+    const sub = await startedOn(r, "sub");
+    await r.engine.complete({
+      token: sub.token,
+      outcome: "drafted",
+      fields: { pr_url: "u" },
+    });
+    r.adapter.setOutcome(sub.adapterRunId, {
+      state: "ended",
+      ending: "ok",
+      runtime: { provider: "metered-key", model: "m" },
+    });
+    await r.engine.tick();
+    expect(limits(r)).toMatchObject([{ scope: "policy", key: "included" }]);
+
+    expect(live(r, (await startedOn(r, "fleet")).runId)).toMatchObject({
+      state: "working",
+    });
+    expect(live(r, (await startedOn(r, "other-set")).runId)).toMatchObject({
+      state: "working",
+    });
+    for (const id of ["sub", "same-set"]) {
+      expect(live(r, (await startedOn(r, id)).runId)).toMatchObject({
+        state: "submitted",
+        waitReason: "paused:policy:included",
+      });
+    }
+  });
+
+  it("a refusal holds every fleet pipeline and the policies that allow its provider", async () => {
+    const r = await make();
+    await pipeline(r, "fleet-a", "fleet");
+    await pipeline(r, "fleet-b", "fleet");
+    await pipeline(r, "sub", "subscription");
+    await pipeline(r, "key-2-only", { allow: ["key-2"] });
+    const a = await startedOn(r, "fleet-a");
+    r.adapter.setOutcome(a.adapterRunId, {
+      state: "ended",
+      ending: "error",
+      error: "You've hit your usage limit · resets 6pm",
+      runtime: { provider: "key-2", model: "m" },
+    });
+    await r.engine.tick();
+    expect(limits(r)).toMatchObject([{ scope: "provider", key: "key-2" }]);
+    for (const id of ["fleet-b", "key-2-only"]) {
+      expect(live(r, (await startedOn(r, id)).runId)).toMatchObject({
+        state: "submitted",
+        waitReason: "paused:provider:key-2",
+      });
+    }
+    expect(live(r, (await startedOn(r, "sub")).runId)).toMatchObject({
+      state: "working",
+    });
+  });
+
+  it("a continuation held by another run's refusal does not time out", async () => {
+    const r = await make();
+    await pipeline(r, "fleet-a", "fleet");
+    await pipeline(r, "fleet-b", "fleet", (def) => {
+      agent(def, "draft").turns.max = 2;
+    });
+    const a = await startedOn(r, "fleet-a");
+    const b = await startedOn(r, "fleet-b");
+    expect(live(r, b.runId)?.deadlineAt).toBe(NOW + 30 * MIN);
+    await r.engine.progress({ token: b.token, note: "part one" });
+    r.adapter.setOutcome(a.adapterRunId, {
+      state: "ended",
+      ending: "error",
+      error: "You've hit your limit · resets 2026-11-22T14:00:00Z",
+    });
+    r.adapter.setOutcome(b.adapterRunId, { state: "ended", ending: "ok" });
+    await r.engine.tick();
+    expect(live(r, b.runId)).toMatchObject({
+      state: "submitted",
+      waitReason: "paused:provider:included",
+      heldSince: NOW,
+    });
+
+    // Well past B's deadline while held: no timeout.
+    r.clock.set(NOW + HOUR);
+    await r.engine.tick();
+    expect(live(r, b.runId)).toMatchObject({ state: "submitted" });
+    expect(eventsOf(r, b.runId)).not.toContain("timeout");
+
+    // Released: the held two hours are added to the deadline.
+    r.clock.set(NOW + 2 * HOUR);
+    await r.engine.tick();
+    expect(live(r, b.runId)).toMatchObject({
+      state: "working",
+      heldSince: null,
+      deadlineAt: NOW + 30 * MIN + 2 * HOUR,
+    });
+    expect(eventsOf(r, b.runId)).not.toContain("timeout");
+  });
+
+  it("a held subscription continuation keeps its remaining budget", async () => {
+    const r = await make();
+    await pipeline(r, "review-loop", "subscription", (def) => {
+      agent(def, "draft").turns.max = 2;
+    });
+    const { runId, token } = await started(r);
+    await r.engine.progress({ token, note: "outline" });
+    r.clock.advance(10 * MIN);
+    r.adapter.setOutcome("fr_1", {
+      state: "ended",
+      ending: "ok",
+      runtime: { provider: "metered-key", model: "m" },
+    });
+    await r.engine.tick();
+    expect(live(r, runId)).toMatchObject({
+      state: "submitted",
+      heldSince: NOW + 10 * MIN,
+      deadlineAt: NOW + 30 * MIN,
+    });
+    r.clock.set(NOW + 40 * MIN);
+    await r.engine.tick();
+    expect(live(r, runId)?.state).toBe("submitted");
+    // The policy pause ends an hour after it began.
+    r.clock.set(NOW + 70 * MIN);
+    await r.engine.tick();
+    expect(live(r, runId)).toMatchObject({
+      state: "working",
+      turnsUsed: 2,
+      deadlineAt: NOW + 90 * MIN,
+    });
+    expect(eventsOf(r, runId)).not.toContain("timeout");
   });
 });

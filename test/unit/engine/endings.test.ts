@@ -1,7 +1,10 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { FakeAdapter } from "../../../src/adapter/fake.js";
 import type { RunOutcome } from "../../../src/adapter/types.js";
 import { classifyEnding } from "../../../src/engine/classify.js";
+import { Engine } from "../../../src/engine/engine.js";
 import type { AgentStage, Definition } from "../../../src/format/types.js";
+import { createRegistry } from "../../../src/host/registry.js";
 import type { StageRunRow, Store } from "../../../src/store/types.js";
 import {
   lastToken,
@@ -195,6 +198,70 @@ describe("turn endings", () => {
       .status(runId)
       .transitions.find((x) => x.event === "completion_refused");
     expect(refused?.detail).toEqual({ reason: "attempt timed out" });
+  });
+
+  it("a completion after the deadline is refused before the tick ends the attempt", async () => {
+    const r = await make();
+    const { runId, token } = await started(r);
+    r.clock.advance(30 * MIN);
+    expect(
+      await r.engine.complete({
+        token,
+        outcome: "drafted",
+        fields: { pr_url: "u" },
+      }),
+    ).toEqual({ ok: false, error: expect.stringMatching(/timed out/) });
+    expect(await r.engine.progress({ token, note: "late" })).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/timed out/),
+    });
+    const refused = r.engine
+      .status(runId)
+      .transitions.filter((x) => x.event.endsWith("_refused"));
+    expect(refused.map((x) => [x.event, x.detail])).toEqual([
+      ["completion_refused", { reason: "attempt timed out" }],
+      ["progress_refused", { reason: "attempt timed out" }],
+    ]);
+    expect(rows(r.store, runId)[0]?.state).toBe("working");
+    await r.engine.tick();
+    expect(rows(r.store, runId)[0]).toMatchObject({ ending: "timeout" });
+  });
+
+  it("an attempt times out while capabilities cannot be read; the abort waits for them", async () => {
+    const r = await make();
+    const { runId } = await started(r);
+    // A restarted engine on the same store, whose harness is not ready.
+    const adapter = new FakeAdapter();
+    const caps = adapter.caps;
+    let ready = false;
+    adapter.capabilities = async () => {
+      if (!ready) throw new Error("not ready");
+      return caps;
+    };
+    const engine = new Engine({
+      store: r.store,
+      adapter,
+      registry: createRegistry(),
+      clock: r.clock,
+      definitions: r.source,
+    });
+    r.clock.advance(30 * MIN);
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await engine.tick();
+      expect(logged).toHaveBeenCalledWith("sekaisen: not ready");
+    } finally {
+      logged.mockRestore();
+    }
+    expect(rows(r.store, runId)[0]).toMatchObject({
+      state: "failed",
+      ending: "timeout",
+    });
+    expect(adapter.aborted).toEqual([]);
+    ready = true;
+    await engine.tick();
+    expect(adapter.aborted).toEqual(["fr_1"]);
+    await engine.stop();
   });
 
   it("a retried attempt gets a fresh deadline and no abort when the harness cannot", async () => {

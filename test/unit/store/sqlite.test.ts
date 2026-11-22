@@ -54,6 +54,7 @@ const stageRun = (over: Partial<NewStageRun> = {}): NewStageRun => ({
   progressAt: null,
   progressSeq: null,
   dispatchedAt: null,
+  heldSince: null,
   runtime: null,
   waitReason: null,
   ...over,
@@ -483,6 +484,36 @@ describe("rows", () => {
       ]);
       t.clearLimit("provider", "p");
       expect(t.listLimits(0).map((l) => l.key)).toEqual(["q"]);
+    });
+  });
+
+  it("a shorter limit never shortens a pause in force", () => {
+    const store = open();
+    const DAY = 86_400_000;
+    store.tx((t) => {
+      t.putLimit({
+        scope: "provider",
+        key: "p",
+        pausedUntil: 5 * DAY,
+        reason: "weekly",
+        setAt: 1,
+      });
+      t.putLimit({
+        scope: "provider",
+        key: "p",
+        pausedUntil: 2 + 3_600_000,
+        reason: "hourly",
+        setAt: 2,
+      });
+      expect(t.listLimits(0)).toEqual([
+        {
+          scope: "provider",
+          key: "p",
+          pausedUntil: 5 * DAY,
+          reason: "weekly",
+          setAt: 1,
+        },
+      ]);
     });
   });
 

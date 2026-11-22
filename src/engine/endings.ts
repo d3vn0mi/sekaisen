@@ -8,7 +8,7 @@ import {
   submit,
   type TransitionDraft,
 } from "./advance.js";
-import { PROVIDER_SCOPE, pausedReason } from "./providers.js";
+import { pausedReason } from "./providers.js";
 
 /**
  * What happens to an attempt once the engine has classified how its turn
@@ -92,41 +92,51 @@ export function continueAttempt(
   append(ctx, transition(row, "submitted", "continue"), detail);
 }
 
+/** A pause to write, and to hold the attempt on. */
+export interface Pause {
+  scope: string;
+  key: string;
+  until: number;
+  reason: string;
+}
+
 /**
- * Pauses `provider` until `until` and sends the attempt back to wait for it.
- * The refused turn costs neither a retry nor one of the attempt's turns,
- * and the deadline starts again with the next turn: time spent paused is
- * not the agent's.
+ * Writes `pause` and sends the attempt back to wait for it; it never costs a
+ * retry. A turn that did no usable work (refused, or ended without a fresh
+ * note) is not counted and the deadline starts again with the next turn. A
+ * turn that left a fresh note keeps its count and the attempt continues from
+ * the note once released; its deadline moves by the time it is held.
  */
 export function pauseAttempt(
   ctx: RunCtx,
   row: StageRunRow,
-  provider: string,
-  until: number,
-  reason: string,
+  pause: Pause,
+  keepTurn: boolean,
   patch: StageRunPatch,
   detail: Detail,
 ): void {
   const { t, now } = ctx;
   t.putLimit({
-    scope: PROVIDER_SCOPE,
-    key: provider,
-    pausedUntil: until,
-    reason,
+    scope: pause.scope,
+    key: pause.key,
+    pausedUntil: pause.until,
+    reason: pause.reason,
     setAt: now,
   });
   move(ctx, row, "submitted", {
     ...patch,
     state: "submitted",
-    waitReason: pausedReason(provider),
-    turnsUsed: Math.max(0, row.turnsUsed - 1),
-    deadlineAt: null,
+    waitReason: pausedReason(pause.scope, pause.key),
+    heldSince: now,
     dispatchedAt: null,
+    ...(keepTurn
+      ? {}
+      : { turnsUsed: Math.max(0, row.turnsUsed - 1), deadlineAt: null }),
   });
   append(ctx, transition(row, "submitted", "usage_limited"), {
     ...detail,
-    provider,
-    until,
+    [pause.scope]: pause.key,
+    until: pause.until,
   });
 }
 

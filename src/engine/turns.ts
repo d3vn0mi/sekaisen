@@ -16,11 +16,12 @@ import {
 } from "./classify.js";
 import { continueAttempt, endAttempt, pauseAttempt } from "./endings.js";
 import type { EmitFn } from "./events.js";
+import { deadlinePassed } from "./lifecycle.js";
 import type { PinnedDefinitions } from "./pinned.js";
 import {
-  isDegraded,
+  degradedPolicy,
+  POLICY_SCOPE,
   PROVIDER_SCOPE,
-  preferredProvider,
   providerPause,
   refusedProvider,
 } from "./providers.js";
@@ -31,11 +32,16 @@ import {
  * stage run and does nothing when it moved on since the harness was asked.
  */
 
-export interface TickCtx {
+/** What every tick transaction needs. */
+export interface TxCtx {
   t: StoreTx;
   pinned: PinnedDefinitions;
   now: number;
   emit: EmitFn;
+}
+
+/** A tick transaction that also needs the harness's capabilities. */
+export interface TickCtx extends TxCtx {
   caps: Capabilities;
 }
 
@@ -43,10 +49,6 @@ export type EndedOutcome = Extract<RunOutcome, { state: "ended" }>;
 
 /** Longest error text kept in a transition or a limit's reason. */
 const MAX_ERROR_CHARS = 1000;
-
-export function deadlinePassed(row: StageRunRow, now: number): boolean {
-  return row.deadlineAt !== null && now >= row.deadlineAt;
-}
 
 /**
  * Records the end of the turn `seen` had in flight. On a completed stage run
@@ -74,37 +76,45 @@ export function recordTurnEnd(
     ...(runtime ?? {}),
   };
 
-  if (o.ending === "ok" && runtime) {
-    const degraded = isDegraded(
-      ctx.pinned.def.providers,
-      runtime.provider,
-      c.caps,
-    );
-    detail.degraded = degraded;
-    if (degraded) {
-      // The turn's work is paid for and stands; later turns wait for the
-      // provider the policy wants.
-      const p = preferredProvider(c.caps);
-      c.t.putLimit({
-        scope: PROVIDER_SCOPE,
-        key: p,
-        pausedUntil: c.now + DEFAULT_PAUSE_MS,
-        reason: `a turn ran on ${runtime.provider}, outside the pipeline's providers`,
-        setAt: c.now,
-      });
-      detail.paused = `${PROVIDER_SCOPE}:${p}`;
-    }
-  }
+  // A turn outside the pipeline's providers pauses that policy. With
+  // `stage_complete` its work stands; without, it is a usage limit.
+  const policy =
+    o.ending === "ok"
+      ? degradedPolicy(ctx.pinned.def.providers, runtime?.provider, c.caps)
+      : undefined;
+  if (o.ending === "ok" && runtime) detail.degraded = policy !== undefined;
+  const policyPause = policy && {
+    scope: POLICY_SCOPE,
+    key: policy,
+    until: c.now + DEFAULT_PAUSE_MS,
+    reason: `a turn ran on ${runtime?.provider}, outside the pipeline's providers`,
+  };
 
   if (row.state !== "working" || run.status !== "working") {
+    if (policyPause) {
+      c.t.putLimit({
+        scope: policyPause.scope,
+        key: policyPause.key,
+        pausedUntil: policyPause.until,
+        reason: policyPause.reason,
+        setAt: c.now,
+      });
+      detail.paused = `${POLICY_SCOPE}:${policy}`;
+    }
     closeTurn(c, row, patch, "turn_ended", detail);
     return;
   }
 
   let ending = classifyEnding(o, row, c.now);
+  const turns = { used: row.turnsUsed, max: stage.turns.max };
+  const canContinue = turns.used < turns.max && !deadlinePassed(row, c.now);
+  if (policyPause) {
+    const keepTurn = ending === "continue" && canContinue;
+    pauseAttempt(ctx, row, policyPause, keepTurn, patch, detail);
+    return;
+  }
   if (ending === "continue") {
-    const turns = { used: row.turnsUsed, max: stage.turns.max };
-    if (turns.used < turns.max && !deadlinePassed(row, c.now)) {
+    if (canContinue) {
       continueAttempt(ctx, row, patch, { ...detail, turns });
       return;
     }
@@ -113,15 +123,13 @@ export function recordTurnEnd(
   }
   if (ending === "usage_limited") {
     const error = o.error ?? "";
-    pauseAttempt(
-      ctx,
-      row,
-      refusedProvider(o.runtime, c.caps),
-      parseReset(error, c.now),
-      clip(refusalLine(error) ?? error),
-      patch,
-      detail,
-    );
+    const pause = {
+      scope: PROVIDER_SCOPE,
+      key: refusedProvider(o.runtime, c.caps),
+      until: parseReset(error, c.now),
+      reason: clip(refusalLine(error) ?? error),
+    };
+    pauseAttempt(ctx, row, pause, false, patch, detail);
     return;
   }
   endAttempt(ctx, row, stage, ending, patch, detail);
@@ -132,10 +140,7 @@ export function recordTurnEnd(
  * when a turn was in flight. The token keeps its hash, so a late completion
  * is refused as timed out.
  */
-export function recordTimeout(
-  c: TickCtx,
-  seen: StageRunRow,
-): string | undefined {
+export function recordTimeout(c: TxCtx, seen: StageRunRow): string | undefined {
   const found = current(c, seen);
   if (!found) return undefined;
   const { row, run, stage, ctx } = found;
@@ -162,7 +167,7 @@ export function recordTimeout(
 }
 
 /** Stops watching a turn there is nothing more to learn about. */
-export function forgetTurn(c: TickCtx, seen: StageRunRow): void {
+export function forgetTurn(c: TxCtx, seen: StageRunRow): void {
   const row = c.t.getStageRun(seen.stageRunId);
   if (!row || !sameTurn(row, seen) || row.dispatchedAt === null) return;
   c.t.updateStageRunIf(
@@ -173,33 +178,44 @@ export function forgetTurn(c: TickCtx, seen: StageRunRow): void {
 }
 
 /**
- * Why a submitted agent stage run must wait for a provider, recording the
- * reason on the row; undefined when it may be dispatched.
+ * Whether a submitted agent stage run is held by a pause. A newly held row
+ * records `heldSince` with the reason; a row released from a hold has its
+ * deadline moved by the time it was held. Returns the row as it now is.
  */
-export function holdForProvider(
+export function admission(
   c: TickCtx,
   seen: StageRunRow,
-): string | undefined {
+): { held: string } | { row: StageRunRow } | undefined {
   const row = c.t.getStageRun(seen.stageRunId);
   if (row?.state !== "submitted") return undefined;
   const run = c.t.getRun(row.runId);
   if (run?.status !== "working") return undefined;
   const def = c.pinned.of(c.t, run).def;
   if (def.stages[row.stage]?.type !== "agent") return undefined;
+  const expect = { state: "submitted" as const, attempt: row.attempt };
   const reason = providerPause(
     row,
     def.providers,
     c.t.listLimits(c.now),
     c.caps,
   );
-  if (reason !== undefined && reason !== row.waitReason) {
-    c.t.updateStageRunIf(
-      row.stageRunId,
-      { state: "submitted", attempt: row.attempt },
-      { waitReason: reason },
-    );
+  if (reason !== undefined) {
+    if (reason !== row.waitReason || row.heldSince === null) {
+      c.t.updateStageRunIf(row.stageRunId, expect, {
+        waitReason: reason,
+        heldSince: row.heldSince ?? c.now,
+      });
+    }
+    return { held: reason };
   }
-  return reason;
+  if (row.heldSince === null) return { row };
+  const released: StageRunPatch = {
+    heldSince: null,
+    deadlineAt:
+      row.deadlineAt === null ? null : row.deadlineAt + (c.now - row.heldSince),
+  };
+  c.t.updateStageRunIf(row.stageRunId, expect, released);
+  return { row: { ...row, ...released } as StageRunRow };
 }
 
 function closeTurn(
@@ -238,7 +254,7 @@ function sameTurn(row: StageRunRow, seen: StageRunRow): boolean {
 
 /** The stage run as it is now, if it is still on the turn `seen` saw. */
 function current(
-  c: TickCtx,
+  c: TxCtx,
   seen: StageRunRow,
 ):
   | { row: StageRunRow; run: RunRow; stage: AgentStage; ctx: RunCtx }

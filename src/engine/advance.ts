@@ -183,6 +183,7 @@ export function submit(
     progressAt: null,
     progressSeq: null,
     dispatchedAt: null,
+    heldSince: null,
     runtime: null,
     waitReason: null,
   });

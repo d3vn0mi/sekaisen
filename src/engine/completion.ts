@@ -3,6 +3,7 @@ import { validateJson } from "../format/jsonschema.js";
 import type { AgentStage } from "../format/types.js";
 import type { RunRow, StageRunRow, StoreTx } from "../store/types.js";
 import { fieldsShorthand } from "./brief.js";
+import { deadlinePassed } from "./lifecycle.js";
 import type { PinnedDefinitions } from "./pinned.js";
 import { hashesEqual, hashToken } from "./tokens.js";
 import { isPlainObject } from "./values.js";
@@ -74,9 +75,12 @@ export function byToken(
   if (!run || stage?.type !== "agent") {
     return refused("this token does not belong to an agent stage");
   }
-  const ended = !["submitted", "working", "completed"].includes(row.state);
+  // An attempt past its deadline is over even before the tick records it.
+  const overdue = row.state !== "completed" && deadlinePassed(row, now);
+  const ended =
+    overdue || !["submitted", "working", "completed"].includes(row.state);
   if (ended) {
-    const timedOut = row.ending === "timeout";
+    const timedOut = overdue || row.ending === "timeout";
     t.appendTransition({
       runId: row.runId,
       stageRunId: row.stageRunId,

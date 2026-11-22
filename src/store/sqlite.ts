@@ -55,6 +55,7 @@ const STAGE_RUN_COLUMNS: Record<keyof StageRunPatch, string> = {
   progressAt: "progress_at",
   progressSeq: "progress_seq",
   dispatchedAt: "dispatched_at",
+  heldSince: "held_since",
   runtime: "runtime_json",
   waitReason: "wait_reason",
 };
@@ -120,6 +121,7 @@ function stageRunFromRow(r: Row): StageRunRow {
     progressAt: r.progress_at as number | null,
     progressSeq: r.progress_seq as number | null,
     dispatchedAt: r.dispatched_at as number | null,
+    heldSince: r.held_since as number | null,
     runtime: fromJson(r.runtime_json) as StageRunRow["runtime"],
     waitReason: r.wait_reason as string | null,
   };
@@ -323,8 +325,8 @@ class SqliteTx implements StoreTx {
           dispatch_seq,
           deadline_at, created_at, started_at, ended_at, outcome, ending,
           fields_json, progress_note, progress_at, progress_seq, dispatched_at,
-          runtime_json, wait_reason)
-       VALUES (${placeholders(26)})`,
+          held_since, runtime_json, wait_reason)
+       VALUES (${placeholders(27)})`,
       row.stageRunId,
       row.runId,
       row.stage,
@@ -349,6 +351,7 @@ class SqliteTx implements StoreTx {
       row.progressAt,
       row.progressSeq,
       row.dispatchedAt,
+      row.heldSince,
       toJson(row.runtime),
       row.waitReason,
     );
@@ -493,9 +496,11 @@ class SqliteTx implements StoreTx {
       `INSERT INTO limits (scope, key, paused_until, reason, set_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (scope, key) DO UPDATE SET
-         paused_until = excluded.paused_until,
-         reason = excluded.reason,
-         set_at = excluded.set_at`,
+         reason = CASE WHEN excluded.paused_until > paused_until
+                       THEN excluded.reason ELSE reason END,
+         set_at = CASE WHEN excluded.paused_until > paused_until
+                       THEN excluded.set_at ELSE set_at END,
+         paused_until = MAX(paused_until, excluded.paused_until)`,
       row.scope,
       row.key,
       row.pausedUntil,

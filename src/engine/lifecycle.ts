@@ -1,4 +1,4 @@
-import type { StageRunState } from "../store/types.js";
+import type { StageRunRow, StageRunState } from "../store/types.js";
 
 /**
  * Legal moves of a stage run. A retry is a new row, so the old row ends
@@ -43,6 +43,16 @@ export class IllegalTransition extends Error {
     super(`illegal stage run transition ${from} -> ${to}`);
     this.name = "IllegalTransition";
   }
+}
+
+/**
+ * True when the attempt's deadline has passed. A stage run a pause is
+ * holding is not running down its deadline, which moves on release.
+ */
+export function deadlinePassed(row: StageRunRow, now: number): boolean {
+  return (
+    row.deadlineAt !== null && row.heldSince === null && now >= row.deadlineAt
+  );
 }
 
 export function assertTransition(from: StageRunState, to: StageRunState): void {

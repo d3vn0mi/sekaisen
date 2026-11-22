@@ -40,15 +40,15 @@ import {
   type EngineEvents,
 } from "./events.js";
 import { newRunId } from "./ids.js";
+import { deadlinePassed } from "./lifecycle.js";
 import { type Pinned, PinnedDefinitions } from "./pinned.js";
 import { deriveToken, hashToken, MIN_TOKEN_SECRET_BYTES } from "./tokens.js";
 import {
-  deadlinePassed,
+  admission,
   forgetTurn,
-  holdForProvider,
   recordTimeout,
   recordTurnEnd,
-  type TickCtx,
+  type TxCtx,
 } from "./turns.js";
 import { descend, errorMessage, isPlainObject } from "./values.js";
 
@@ -140,6 +140,8 @@ export class Engine {
   private readonly callTimeoutMs: number;
   private readonly timers: Timers;
   private caps?: Promise<Capabilities>;
+  /** Turns to abort once the harness's capabilities can be read. */
+  private readonly pendingAborts: string[] = [];
   private timer?: ReturnType<typeof setInterval>;
   private ticking?: Promise<void>;
 
@@ -412,13 +414,15 @@ export class Engine {
 
   private async walk(): Promise<void> {
     if (!this.dispatching) return;
-    let caps: Capabilities;
+    let caps: Capabilities | undefined;
     try {
       caps = await this.capabilities();
     } catch (err) {
+      // Deadlines are still enforced; aborts, turn ends and dispatch wait
+      // for the capabilities.
       this.report(err);
-      return;
     }
+    if (caps) await this.flushAborts(caps);
     // Turns first, so a continuation or retry they submit is dispatched in
     // the same pass.
     const inFlight = this.store.tx((t) =>
@@ -432,6 +436,7 @@ export class Engine {
         this.report(err);
       }
     }
+    if (!caps) return;
     const submitted = this.store.tx((t) =>
       t.listStageRuns({ state: ["submitted"], limit: TICK_BATCH }),
     );
@@ -464,17 +469,21 @@ export class Engine {
    * One stage run with a turn in flight: an attempt past its deadline times
    * out; otherwise the turn's end, once the harness reports it, is recorded.
    */
-  private async observe(row: StageRunRow, caps: Capabilities): Promise<void> {
+  private async observe(
+    row: StageRunRow,
+    caps: Capabilities | undefined,
+  ): Promise<void> {
     if (row.state === "working" && deadlinePassed(row, this.clock.now())) {
       await this.timeOut(row, caps);
       return;
     }
+    if (!caps) return;
     const adapterRunId = row.adapterRunId;
     if (
       adapterRunId === null ||
       !["working", "completed"].includes(row.state)
     ) {
-      this.commit((t, emit) => forgetTurn(this.tickCtx(t, emit, caps), row));
+      this.commit((t, emit) => forgetTurn(this.txCtx(t, emit), row));
       return;
     }
     let outcome: RunOutcome;
@@ -491,21 +500,31 @@ export class Engine {
       // A working turn the harness no longer knows is for restart
       // reconciliation; a completed one has nothing left to tell.
       if (row.state === "completed") {
-        this.commit((t, emit) => forgetTurn(this.tickCtx(t, emit, caps), row));
+        this.commit((t, emit) => forgetTurn(this.txCtx(t, emit), row));
       }
       return;
     }
     const ended = outcome;
     this.commit((t, emit) =>
-      recordTurnEnd(this.tickCtx(t, emit, caps), row, ended),
+      recordTurnEnd({ ...this.txCtx(t, emit), caps }, row, ended),
     );
   }
 
-  private async timeOut(row: StageRunRow, caps: Capabilities): Promise<void> {
+  private async timeOut(
+    row: StageRunRow,
+    caps: Capabilities | undefined,
+  ): Promise<void> {
     const abort = this.commit((t, emit) =>
-      recordTimeout(this.tickCtx(t, emit, caps), row),
+      recordTimeout(this.txCtx(t, emit), row),
     );
-    if (abort !== undefined) await this.abort(abort, caps);
+    if (abort === undefined) return;
+    if (caps) await this.abort(abort, caps);
+    else this.pendingAborts.push(abort);
+  }
+
+  /** Aborts turns whose attempts timed out while capabilities were unknown. */
+  private async flushAborts(caps: Capabilities): Promise<void> {
+    for (const id of this.pendingAborts.splice(0)) await this.abort(id, caps);
   }
 
   /** Asks the harness to stop a turn, where it can; a failure changes nothing. */
@@ -517,17 +536,20 @@ export class Engine {
     );
   }
 
-  /** A submitted stage run: timed out, held for a provider, or dispatched. */
-  private async admit(row: StageRunRow, caps: Capabilities): Promise<void> {
-    if (deadlinePassed(row, this.clock.now())) {
-      await this.timeOut(row, caps);
+  /**
+   * A submitted stage run: held by a pause (which keeps its deadline from
+   * running), else timed out, else dispatched.
+   */
+  private async admit(seen: StageRunRow, caps: Capabilities): Promise<void> {
+    const found = this.commit((t, emit) =>
+      admission({ ...this.txCtx(t, emit), caps }, seen),
+    );
+    if (!found || "held" in found) return;
+    if (deadlinePassed(found.row, this.clock.now())) {
+      await this.timeOut(found.row, caps);
       return;
     }
-    const held = this.commit((t, emit) =>
-      holdForProvider(this.tickCtx(t, emit, caps), row),
-    );
-    if (held !== undefined) return;
-    await this.dispatch(row.stageRunId, caps);
+    await this.dispatch(found.row.stageRunId, caps);
   }
 
   /**
@@ -788,8 +810,8 @@ export class Engine {
 
   // --- plumbing -----------------------------------------------------------
 
-  private tickCtx(t: StoreTx, emit: EmitFn, caps: Capabilities): TickCtx {
-    return { t, pinned: this.pinned, now: this.clock.now(), emit, caps };
+  private txCtx(t: StoreTx, emit: EmitFn): TxCtx {
+    return { t, pinned: this.pinned, now: this.clock.now(), emit };
   }
 
   private ctx(t: StoreTx, run: RunRow, emit: EmitFn): RunCtx {

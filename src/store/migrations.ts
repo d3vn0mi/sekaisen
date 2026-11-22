@@ -60,6 +60,7 @@ export const MIGRATIONS: readonly string[] = [
     progress_at     INTEGER,
     progress_seq    INTEGER,
     dispatched_at   INTEGER,
+    held_since      INTEGER,
     runtime_json    TEXT,
     wait_reason     TEXT
   );
