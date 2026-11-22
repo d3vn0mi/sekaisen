@@ -59,9 +59,25 @@ function snapshot(store: Store, runId: string): Snapshot | undefined {
   });
 }
 
+/**
+ * Text fit for a terminal: tabs and line breaks become spaces and every
+ * other C0 or C1 control character is dropped, so a value an agent or a
+ * harness supplied can neither move the cursor nor forge a line of output.
+ */
+export function printable(text: string): string {
+  let out = "";
+  for (const ch of text) {
+    const c = ch.codePointAt(0) ?? 0;
+    if (c === 0x09 || c === 0x0a || c === 0x0d) out += " ";
+    else if (c >= 0x20 && (c < 0x7f || c > 0x9f)) out += ch;
+  }
+  return out;
+}
+
 function transitionLine(n: number, row: TransitionRow, stage?: string): string {
-  const outcome = row.outcome === null ? "" : ` [${row.outcome}]`;
-  return `${n} ${stage ?? "run"}: ${row.fromState ?? "-"} → ${row.toState} ${row.event}${outcome} ${row.actor}`;
+  const p = printable;
+  const outcome = row.outcome === null ? "" : ` [${p(row.outcome)}]`;
+  return `${n} ${p(stage ?? "run")}: ${p(row.fromState ?? "-")} → ${p(row.toState)} ${p(row.event)}${outcome} ${p(row.actor)}`;
 }
 
 function liveView(s: StageRunRow) {
@@ -116,13 +132,15 @@ function jsonView(s: Snapshot, shown: Snapshot["rows"]): unknown {
   };
 }
 
+/** The human view. Every value from the store goes through `printable`. */
 function textView(s: Snapshot, shown: Snapshot["rows"]): string {
   const { run } = s;
+  const p = printable;
   const out: string[] = [
-    `run: ${run.runId}`,
-    `pipeline: ${run.pipelineId} (${run.defHash.slice(0, HASH_SHORT)})`,
-    `status: ${run.status}`,
-    `stage: ${run.currentStage}`,
+    `run: ${p(run.runId)}`,
+    `pipeline: ${p(run.pipelineId)} (${p(run.defHash.slice(0, HASH_SHORT))})`,
+    `status: ${p(run.status)}`,
+    `stage: ${p(run.currentStage)}`,
     `created: ${iso(run.createdAt)}`,
     `updated: ${iso(run.updatedAt)}`,
   ];
@@ -130,16 +148,16 @@ function textView(s: Snapshot, shown: Snapshot["rows"]): string {
     const l = s.live;
     out.push(
       "",
-      `live: ${l.stage} ${l.state} attempt ${l.attempt} visit ${l.visit} retry ${l.retryIndex}`,
-      `  wait_reason: ${l.waitReason ?? "-"}`,
+      `live: ${p(l.stage)} ${p(l.state)} attempt ${l.attempt} visit ${l.visit} retry ${l.retryIndex}`,
+      `  wait_reason: ${p(l.waitReason ?? "-")}`,
       `  deadline: ${l.deadlineAt === null ? "-" : iso(l.deadlineAt)}`,
     );
   }
   if (s.gate) {
     out.push(
       "",
-      `gate: ${s.gate.prompt ?? "-"}`,
-      `  outcomes: ${(s.gate.outcomes ?? []).join(", ") || "-"}`,
+      `gate: ${p(s.gate.prompt ?? "-")}`,
+      `  outcomes: ${p((s.gate.outcomes ?? []).join(", ")) || "-"}`,
       `  remind_at: ${s.gate.remindAt === null ? "-" : iso(s.gate.remindAt)}`,
     );
   }
@@ -148,7 +166,7 @@ function textView(s: Snapshot, shown: Snapshot["rows"]): string {
     for (const u of s.turns) {
       const r = u.runtime;
       out.push(
-        `  ${u.stage} attempt ${u.attempt}: ${r?.provider ?? "-"}${r?.model ? ` ${r.model}` : ""}`,
+        `  ${p(u.stage)} attempt ${u.attempt}: ${p(r?.provider ?? "-")}${r?.model ? ` ${p(r.model)}` : ""}`,
       );
     }
   }

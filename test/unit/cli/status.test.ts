@@ -1,5 +1,6 @@
 import { statSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { openSqliteStore } from "../../../src/store/sqlite.js";
 import { cleanup, cli, type Fixture, makeStore } from "./store-fixture.js";
 
 let fx: Fixture;
@@ -107,6 +108,55 @@ describe("sekaisen status", () => {
     await cli("status", fx.done, "--store", fx.file, "--json");
     const after = statSync(fx.file);
     expect([after.size, after.mtimeMs]).toEqual([before.size, before.mtimeMs]);
+  });
+
+  test("text output strips control characters from agent-derived text; --json keeps it raw", async () => {
+    const topic = "go\u001b[2J\nstatus: completed\u009b31m\u0007";
+    const provider = "demo\u001b]0;title\u0007-provider";
+    const own = await makeStore({ gatedTopic: topic, provider });
+    const store = openSqliteStore(own.file);
+    store.tx((t) => {
+      t.appendTransition({
+        runId: own.gated,
+        stageRunId: null,
+        fromState: "input_required",
+        toState: "input_required",
+        event: "note\u001b[1m",
+        outcome: null,
+        actor: "agent:intruder\u001b[31m\r\u0085",
+        at: 1_700_000_100_000,
+        detail: null,
+      });
+    });
+    store.close();
+    const hasControl = (text: string) =>
+      [...text].some((ch) => {
+        const c = ch.codePointAt(0) ?? 0;
+        return c !== 0x0a && (c < 0x20 || (c >= 0x7f && c <= 0x9f));
+      });
+    const gated = await cli("status", own.gated, "--store", own.file);
+    expect(gated.code).toBe(0);
+    expect(hasControl(gated.out)).toBe(false);
+    expect(gated.out).toContain(
+      "gate: Checks keep failing for go[2J status: completed31m. Publish anyway?\n",
+    );
+    expect(gated.lines.filter((l) => l.startsWith("status:"))).toEqual([
+      "status: input_required",
+    ]);
+    expect(gated.out).toContain(" note[1m agent:intruder[31m ");
+    const done = await cli("status", own.done, "--store", own.file);
+    expect(hasControl(done.out)).toBe(false);
+    expect(done.out).toContain(
+      "  draft attempt 1: demo]0;title-provider demo-model\n",
+    );
+    const json = JSON.parse(
+      (await cli("status", own.gated, "--store", own.file, "--json")).out,
+    );
+    expect(json.gate.prompt).toContain(topic);
+    const raw = JSON.parse(
+      (await cli("status", own.done, "--store", own.file, "--json")).out,
+    );
+    expect(raw.providers[0].provider).toBe(provider);
   });
 
   test("an unknown run id is `run <id> not found`, exit 1", async () => {

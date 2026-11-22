@@ -53,7 +53,9 @@ export interface Fixture {
  * A store file written by the real engine on the fix-loop definition: one
  * run that completed and one that waits at an operator gate.
  */
-export async function makeStore(): Promise<Fixture> {
+export async function makeStore(
+  opts: { gatedTopic?: string; provider?: string } = {},
+): Promise<Fixture> {
   const file = path.join(tempDir(), "runs.sqlite");
   const store = openSqliteStore(file);
   const adapter = new FakeAdapter();
@@ -85,7 +87,10 @@ export async function makeStore(): Promise<Fixture> {
   adapter.setOutcome("fr_1", {
     state: "ended",
     ending: "ok",
-    runtime: { provider: "demo-provider", model: "demo-model" },
+    runtime: {
+      provider: opts.provider ?? "demo-provider",
+      model: "demo-model",
+    },
   });
   await engine.tick();
   await finish("drafted");
@@ -93,7 +98,9 @@ export async function makeStore(): Promise<Fixture> {
   await engine.tick();
 
   clock.advance(60_000);
-  const gated = (await engine.startRun("fix-loop", { topic: "go" })).runId;
+  const gated = (
+    await engine.startRun("fix-loop", { topic: opts.gatedTopic ?? "go" })
+  ).runId;
   for (let i = 0; i < 3; i++) {
     await finish("drafted");
     await finish("fail");
