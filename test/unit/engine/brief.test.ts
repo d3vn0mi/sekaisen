@@ -37,6 +37,16 @@ describe("renderBrief", () => {
     expect(out).toContain("Write about tea (2) after On Tea in r_ABC.");
   });
 
+  it("walks object keys only: an array element or its length is unset", () => {
+    const out = renderBrief(
+      "{{draft.list.0}} {{draft.list.length}} {{draft.title.length}} {{draft.meta.words}}",
+      data(),
+    );
+    expect(out).toContain(
+      "(unset: draft.list.0) (unset: draft.list.length) (unset: draft.title.length) 90",
+    );
+  });
+
   it("renders objects as compact JSON and strings raw", () => {
     const out = renderBrief(
       "{{draft.meta}} {{draft.list}} {{draft.meta.words}}",

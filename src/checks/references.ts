@@ -1,4 +1,5 @@
 import type { LoadedDefinition } from "../format/load.js";
+import { PLACEHOLDER } from "../format/rules.js";
 import {
   type GuardAst,
   GuardSyntaxError,
@@ -31,8 +32,6 @@ function counters(ast: GuardAst): Counter[] {
       return [];
   }
 }
-
-export const PLACEHOLDER = /\{\{\s*([^{}]*?)\s*\}\}/g;
 
 /**
  * For each stage, the stages that lie on every path from start to it

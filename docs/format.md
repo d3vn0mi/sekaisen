@@ -328,7 +328,9 @@ placeholders, trims trailing whitespace, adds a blank line and appends the foote
 | `{{s.a.b}}` | Field `a.b` of the latest completed attempt of stage `s` |
 
 A string is inserted as it is; any other value as JSON. A value that is not set reads
-`(unset: <name>)`. Inserted text is not scanned for placeholders again.
+`(unset: <name>)`. A path names keys of objects only, as in guards: an array is inserted whole,
+and an element or a property of it (`{{s.list.0}}`, `{{s.list.length}}`) is not set. Inserted
+text is not scanned for placeholders again.
 
 Inserted values and checkpoint notes come from agents, so they are untrusted. Any line of them
 that contains `completion token` (in any case), or that starts with optional spaces and `#`

@@ -4,10 +4,17 @@ export function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-/** The value at a dotted path of own properties, or undefined. */
-export function descend(value: unknown, path: string): unknown {
+/**
+ * The value at a path of own properties of plain objects (a dotted string or
+ * its keys), or undefined. Arrays are not walked: guards, placeholders and
+ * host functions read fields by name, never by index.
+ */
+export function descend(
+  value: unknown,
+  path: string | readonly string[],
+): unknown {
   let cur = value;
-  for (const key of path.split(".")) {
+  for (const key of typeof path === "string" ? path.split(".") : path) {
     if (!isPlainObject(cur) || !Object.hasOwn(cur, key)) return undefined;
     cur = cur[key];
   }

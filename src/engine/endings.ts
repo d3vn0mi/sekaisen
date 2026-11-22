@@ -1,3 +1,4 @@
+import { failedEnd } from "../format/rules.js";
 import type {
   Definition,
   RetryEnding,
@@ -46,10 +47,7 @@ export function exhaustedTarget(
   def: Definition,
   stage: AttemptPolicy,
 ): string | undefined {
-  if (stage.onExhausted !== undefined) return stage.onExhausted;
-  return Object.entries(def.stages).find(
-    ([, s]) => s.type === "end" && s.status === "failed",
-  )?.[0];
+  return stage.onExhausted ?? failedEnd(def);
 }
 
 /** True when `ending` may retry the stage once more. */
@@ -70,8 +68,27 @@ export function canRetry(
  * new row in the same visit) or takes the stage's exhaustion edge. An
  * engine-classified ending never picks one of the stage's outcomes. The
  * transition is named after the ending unless `event` names it; a null
- * ending (the stage itself is wrong, not its run) is never retried.
+ * ending (the stage itself is wrong, not its run) is never retried and
+ * must name its event.
  */
+export function endAttempt(
+  ctx: RunCtx,
+  row: StageRunRow,
+  stage: AttemptPolicy,
+  ending: RetryEnding,
+  patch: StageRunPatch,
+  detail: Detail,
+  event?: string,
+): void;
+export function endAttempt(
+  ctx: RunCtx,
+  row: StageRunRow,
+  stage: AttemptPolicy,
+  ending: null,
+  patch: StageRunPatch,
+  detail: Detail,
+  event: string,
+): void;
 export function endAttempt(
   ctx: RunCtx,
   row: StageRunRow,
@@ -79,7 +96,7 @@ export function endAttempt(
   ending: RetryEnding | null,
   patch: StageRunPatch,
   detail: Detail,
-  event: string = ending ?? "stage_failed",
+  event?: string,
 ): void {
   const { t, now } = ctx;
   move(ctx, row, "failed", {
@@ -92,7 +109,11 @@ export function endAttempt(
     wakeAt: null,
   });
   const actor = actorOf(ctx);
-  const draft = transition(row, "failed", event, actor);
+  const name = event ?? ending;
+  if (name === null) {
+    throw new Error("an attempt ended without an ending must name its event");
+  }
+  const draft = transition(row, "failed", name, actor);
   if (canRetry(stage, row, ending)) {
     const attempt = t.maxAttempt(row.runId, row.stage) + 1;
     append(ctx, draft, { ...detail, retry: { attempt } });

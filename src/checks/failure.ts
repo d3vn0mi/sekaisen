@@ -1,5 +1,6 @@
 import type { LoadedDefinition } from "../format/load.js";
-import type { Definition, Stage } from "../format/types.js";
+import { failedEnd } from "../format/rules.js";
+import type { Stage } from "../format/types.js";
 import type { Finding } from "./index.js";
 
 /**
@@ -20,13 +21,6 @@ export function canFail(stage: Stage): boolean {
     default:
       return false;
   }
-}
-
-/** The first `end` stage with status `failed`, where an exhausted stage goes by default. */
-export function failedEnd(def: Definition): string | undefined {
-  return Object.entries(def.stages).find(
-    ([, s]) => s.type === "end" && s.status === "failed",
-  )?.[0];
 }
 
 /**

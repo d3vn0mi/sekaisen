@@ -1,6 +1,7 @@
 import type { LoadedDefinition } from "../format/load.js";
+import { failedEnd } from "../format/rules.js";
 import { edgesOf } from "./edges.js";
-import { canFail, failedEnd } from "./failure.js";
+import { canFail } from "./failure.js";
 import type { Finding } from "./index.js";
 
 const err = (stage: string, message: string): Finding => ({

@@ -1,5 +1,6 @@
-import { PLACEHOLDER } from "../checks/references.js";
 import type { JsonSchema } from "../format/jsonschema.js";
+import { PLACEHOLDER } from "../format/rules.js";
+import { descend } from "./values.js";
 
 /** The outcomes of a stage as the brief needs them: names and field schemas. */
 export type BriefOutcomes = Record<string, { fields?: JsonSchema }>;
@@ -68,21 +69,6 @@ function footer(token: string, outcomes: BriefOutcomes): string {
     "{outcomes}",
     () => outcomesList(outcomes),
   );
-}
-
-function descend(value: unknown, path: string[]): unknown {
-  let cur = value;
-  for (const key of path) {
-    if (
-      cur === null ||
-      typeof cur !== "object" ||
-      !Object.hasOwn(cur as object, key)
-    ) {
-      return undefined;
-    }
-    cur = (cur as Record<string, unknown>)[key];
-  }
-  return cur;
 }
 
 const FOOTER_HEADING = /^\s*#*\s*Reporting your result/i;
