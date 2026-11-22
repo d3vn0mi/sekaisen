@@ -1,0 +1,18 @@
+stateDiagram-v2
+  state "draft (agent: drafter)" as s_draft
+  state "check (agent: checker)" as s_check
+  state "publish (gate)" as s_publish
+  state "done (end)" as s_done
+  state "failed (end)" as s_failed
+  [*] --> s_draft
+  s_draft --> s_check : drafted
+  s_draft --> s_failed : blocked
+  s_check --> s_publish : pass
+  s_check --> s_draft : fail [count(check.fail) < 3]
+  s_check --> s_failed : fail
+  s_publish --> s_done : approve
+  s_publish --> s_failed : reject
+  s_done --> [*] : completed
+  s_failed --> [*] : failed
+  classDef current fill:#fde68a,stroke:#b45309,stroke-width:2px
+  classDef taken fill:#d1fae5,stroke:#047857
