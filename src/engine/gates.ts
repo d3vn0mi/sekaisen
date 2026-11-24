@@ -273,7 +273,7 @@ function openGate(
   if (!operator) return { row: opened, ctx };
   const rctx = withRunStatus(ctx, "input_required");
   // A gate first seen at or past its timeout is not announced here: it
-  // takes its timeout edge, or its first reminder announces it, in the same
+  // takes its timeout edge, or its first `gate_reminder` announces it, in the same
   // transaction.
   if (ctx.now < timeoutAt) emitGate(rctx, opened, gate);
   return { row: opened, ctx: rctx };
@@ -305,8 +305,9 @@ function timeOut(
 
 /**
  * Writes a `gate_reminder` transition and schedules the next one. An
- * operator gate also emits its `gate` event again; a poll gate has nobody
- * to remind, so the transition is the whole reminder.
+ * operator gate also emits `gate_reminder`, numbered from 1 by counting the
+ * stage run's reminders in the log; its `gate` event fires only on entry. A
+ * poll gate has nobody to remind, so the transition is the whole reminder.
  */
 function remind(
   ctx: RunCtx,
@@ -320,10 +321,25 @@ function remind(
       : stage.timeout;
   const next = { ...gate, remindAt: ctx.now + every };
   ctx.t.upsertGate(next);
+  const reminder =
+    ctx.t
+      .transitions(row.runId)
+      .filter(
+        (x) => x.stageRunId === row.stageRunId && x.event === "gate_reminder",
+      ).length + 1;
   append(ctx, transition(row, row.state, "gate_reminder"), {
     nextReminderAt: next.remindAt,
   });
-  if (gate.kind === "operator") emitGate(ctx, row, next);
+  if (gate.kind === "operator") {
+    ctx.emit("gate_reminder", {
+      runId: row.runId,
+      stageRunId: row.stageRunId,
+      stage: row.stage,
+      prompt: next.prompt,
+      outcomes: next.outcomes ?? [],
+      reminder,
+    });
+  }
   return next;
 }
 

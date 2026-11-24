@@ -148,8 +148,8 @@ the abort fails, and it retries a failed abort with backoff. An adapter without 
 ### `deliver(sessionKey, message)`
 
 Sends a message into a session without starting a stage run. The engine does not call it yet: a gate
-reminder is a transition in the log and a `gate` event the host can show however it likes. A host may
-use `deliver` for its own notifications, such as relaying that event into a session.
+reminder is a transition in the log and a `gate_reminder` event (the `gate` event fires once, on entry) the host can show however it likes. A host may
+use `deliver` for its own notifications, such as relaying those events into a session.
 
 ### `schedule(spec, fn)` and `guardToolCall(fn)` (optional)
 

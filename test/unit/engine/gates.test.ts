@@ -52,6 +52,12 @@ function gateEvents(r: Rig): Array<EngineEvents["gate"]> {
   return seen;
 }
 
+function reminderEvents(r: Rig): Array<EngineEvents["gate_reminder"]> {
+  const seen: Array<EngineEvents["gate_reminder"]> = [];
+  r.engine.on("gate_reminder", (e) => seen.push(e));
+  return seen;
+}
+
 const live = (r: Rig, runId: string): StageRunRow => {
   const row = r.engine.status(runId).live;
   if (!row) throw new Error("no live stage run");
@@ -142,6 +148,7 @@ describe("operator gates", () => {
       onTimeout: { remind: 10 * MIN },
     });
     const seen = gateEvents(r);
+    const reminders = reminderEvents(r);
     const { runId } = await r.engine.startRun("held", {});
     await r.engine.tick();
     expect(seen).toHaveLength(1);
@@ -150,27 +157,68 @@ describe("operator gates", () => {
 
     r.clock.advance(HOUR - 1);
     await r.engine.tick();
-    expect(seen).toHaveLength(1);
+    expect(reminders).toHaveLength(0);
     r.clock.advance(1);
     await r.engine.tick();
-    expect(seen).toHaveLength(2);
-    expect(seen[1]).toEqual(seen[0]);
+    expect(seen).toHaveLength(1);
+    expect(reminders).toHaveLength(1);
     expect(r.store.tx((t) => t.getGate(id))?.remindAt).toBe(
       1_000_000 + HOUR + 10 * MIN,
     );
 
     r.clock.advance(10 * MIN - 1);
     await r.engine.tick();
-    expect(seen).toHaveLength(2);
+    expect(reminders).toHaveLength(1);
     r.clock.advance(1);
     await r.engine.tick();
-    expect(seen).toHaveLength(3);
+    expect(seen).toHaveLength(1);
+    expect(reminders).toHaveLength(2);
     expect(events(r, runId).filter((e) => e === "gate_reminder")).toHaveLength(
       2,
     );
     // Reminding never moves the gate on.
     expect(live(r, runId)).toMatchObject({ state: "input_required" });
     expect(r.engine.status(runId).run.status).toBe("input_required");
+  });
+
+  it("a gate past its timeout with remind emits gate_reminder once per reminder", async () => {
+    const r = await gated({
+      who: "operator",
+      prompt: "Go?",
+      outcomes: { approve: { next: "done" }, reject: { next: "failed" } },
+      timeout: HOUR,
+      onTimeout: { remind: 10 * MIN },
+    });
+    const reminders = reminderEvents(r);
+    const seen = gateEvents(r);
+    const { runId } = await r.engine.startRun("held", {});
+    await r.engine.tick();
+    expect(reminders).toHaveLength(0);
+    r.clock.advance(HOUR);
+    await r.engine.tick();
+    r.clock.advance(10 * MIN);
+    await r.engine.tick();
+    const id = live(r, runId).stageRunId;
+    expect(reminders).toEqual([
+      {
+        runId,
+        stageRunId: id,
+        stage: "g",
+        prompt: "Go?",
+        outcomes: ["approve", "reject"],
+        reminder: 1,
+      },
+      {
+        runId,
+        stageRunId: id,
+        stage: "g",
+        prompt: "Go?",
+        outcomes: ["approve", "reject"],
+        reminder: 2,
+      },
+    ]);
+    // The gate event fires once, on entry; a reminder does not repeat it.
+    expect(seen).toHaveLength(1);
   });
 
   it("a long outage sends one reminder, not one per missed interval", async () => {
@@ -180,11 +228,13 @@ describe("operator gates", () => {
       onTimeout: { remind: 10 * MIN },
     });
     const seen = gateEvents(r);
+    const reminders = reminderEvents(r);
     const { runId } = await r.engine.startRun("held", {});
     await r.engine.tick();
     r.clock.advance(5 * HOUR);
     await r.engine.tick();
-    expect(seen).toHaveLength(2);
+    expect(seen).toHaveLength(1);
+    expect(reminders).toHaveLength(1);
     expect(seen[0]?.prompt).toBeNull();
     const id = live(r, runId).stageRunId;
     expect(r.store.tx((t) => t.getGate(id))?.remindAt).toBe(
@@ -248,17 +298,20 @@ describe("operator gates", () => {
     });
   });
 
-  it("a gate first seen past its timeout with remind emits once", async () => {
+  it("a gate first seen past its timeout with remind emits one gate_reminder", async () => {
     const r = await gated({
       who: "operator",
       timeout: HOUR,
       onTimeout: { remind: 10 * MIN },
     });
     const seen = gateEvents(r);
+    const reminders = reminderEvents(r);
     const { runId } = await r.engine.startRun("held", {});
     r.clock.advance(2 * HOUR);
     await r.engine.tick();
-    expect(seen).toHaveLength(1);
+    // Announced by its first reminder alone, never by both events.
+    expect(seen).toHaveLength(0);
+    expect(reminders).toHaveLength(1);
     expect(events(r, runId).filter((e) => e === "gate_reminder")).toHaveLength(
       1,
     );

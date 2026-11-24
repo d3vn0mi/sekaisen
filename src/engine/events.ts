@@ -16,6 +16,15 @@ export interface EngineEvents {
     prompt: string | null;
     outcomes: string[];
   };
+  /** An operator gate is still open past its timeout; `reminder` counts from 1. */
+  gate_reminder: {
+    runId: string;
+    stageRunId: string;
+    stage: string;
+    prompt: string | null;
+    outcomes: string[];
+    reminder: number;
+  };
 }
 
 export type EngineEvent = keyof EngineEvents;

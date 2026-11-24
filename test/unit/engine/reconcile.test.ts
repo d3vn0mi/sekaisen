@@ -439,8 +439,8 @@ describe("gates and waits across a restart", () => {
     r.clock.advance(5 * MIN);
     const before = snapshot();
     const engine = restarted(r);
-    const reminders: Array<EngineEvents["gate"]> = [];
-    engine.on("gate", (e) => reminders.push(e));
+    const reminders: Array<EngineEvents["gate_reminder"]> = [];
+    engine.on("gate_reminder", (e) => reminders.push(e));
     await engine.start();
     await engine.stop();
     expect(snapshot()).toEqual(before);

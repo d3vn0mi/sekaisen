@@ -13,6 +13,8 @@ Pre-0.1. Nothing is installable yet.
 
 ### Added
 
+- A `gate_reminder` engine event, with the gate's prompt and outcomes and a `reminder` count from 1. An
+  operator gate's reminder emits it in place of a repeated `gate` event, which now fires once, on entry.
 - Format 1: pipeline definitions in YAML with `agent`, `gate`, `check`, `action`, `wait` and `end`
   stages, a published JSON Schema (`sekaisen/schema.json`), field shorthand, identifiers, a small
   guard language and brief templates, documented in [`docs/format.md`](docs/format.md).
