@@ -4,7 +4,8 @@ import type {
   RunOutcome,
   StartTurn,
 } from "../adapter/types.js";
-import type { PluginApi } from "./api.js";
+import { refusalLine } from "../engine/classify.js";
+import type { PluginApi, TaskRunView } from "./api.js";
 
 export interface AdapterOptions {
   api: PluginApi;
@@ -37,6 +38,8 @@ export class OpenClawAdapter implements HarnessAdapter {
   private readonly api: PluginApi;
   private readonly o: AdapterOptions;
   private readonly owners = new Map<string, string>();
+  /** Run ids this adapter cancelled itself; they read as killed. Kept for the process's life. */
+  protected readonly aborted = new Set<string>();
 
   constructor(o: AdapterOptions) {
     this.o = o;
@@ -49,7 +52,32 @@ export class OpenClawAdapter implements HarnessAdapter {
   }
 
   async capabilities(): Promise<Capabilities> {
-    throw new Error("not implemented yet");
+    const cfg = await this.config();
+    const defaults = obj(obj(cfg).agents).defaults;
+    const timeoutS = num(obj(defaults).timeoutSeconds);
+    const lane = num(obj(obj(defaults).subagents).maxConcurrent);
+    return {
+      turnCapMs:
+        this.o.turnCapMs ??
+        (timeoutS !== undefined ? timeoutS * 1000 : 5_400_000),
+      maxConcurrent: this.o.maxConcurrent ?? lane ?? 8,
+      canAbort: true,
+      subscriptionProvider: this.o.subscriptionProvider ?? "claude-cli",
+      agentTools: async (agent) => {
+        const c = await this.config();
+        const agents = obj(obj(c).agents);
+        const own = alsoAllow(agentEntry(agents, agent));
+        return own ?? alsoAllow(agents.defaults) ?? [];
+      },
+    };
+  }
+
+  private async config(): Promise<unknown> {
+    try {
+      return await this.api.runtime.config.current();
+    } catch {
+      return undefined;
+    }
   }
 
   async openSession(_agent: string, _key: string): Promise<void> {
@@ -79,8 +107,90 @@ export class OpenClawAdapter implements HarnessAdapter {
     }
   }
 
-  async readRunOutcome(_runId: string): Promise<RunOutcome> {
-    throw new Error("not implemented yet");
+  async readRunOutcome(runId: string): Promise<RunOutcome> {
+    const found = await this.findRow(runId);
+    if (!found) return { state: "unknown" };
+    const { row, agent } = found;
+    if (row.status === "queued" || row.status === "running") {
+      return { state: "running" };
+    }
+    if (row.status === "lost") return { state: "unknown" };
+
+    const wasAborted = this.aborted.has(runId);
+    const ending: "ok" | "error" | "timeout" | "killed" = wasAborted
+      ? "killed"
+      : row.status === "succeeded"
+        ? "ok"
+        : row.status === "timed_out"
+          ? "timeout"
+          : row.status === "cancelled"
+            ? "killed"
+            : "error";
+
+    const waited = await this.waitText(runId);
+    const texts = [waited, row.error, row.terminalSummary].filter(
+      (t): t is string => typeof t === "string" && t.length > 0,
+    );
+    const error = texts.find((t) => refusalLine(t) !== undefined) ?? texts[0];
+
+    const out: RunOutcome = { state: "ended", ending };
+    if (error !== undefined) out.error = error;
+    const runtime = await this.runtimeOf(agent, row.childSessionKey);
+    if (runtime) out.runtime = runtime;
+    // An aborted run stays remembered so a repeat read still says killed.
+    if (!wasAborted) this.owners.delete(runId);
+    return out;
+  }
+
+  private async waitText(runId: string): Promise<string | undefined> {
+    try {
+      const w = await this.api.runtime.subagent.waitForRun({
+        runId,
+        timeoutMs: 1,
+      });
+      return typeof w?.error === "string" ? w.error : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async runtimeOf(
+    agent: string,
+    sessionKey: string | undefined,
+  ): Promise<{ provider: string; model: string } | undefined> {
+    if (!sessionKey) return undefined;
+    try {
+      const e = await this.api.runtime.agent.session.getSessionEntry({
+        agentId: agent,
+        sessionKey,
+        readConsistency: "latest",
+      });
+      if (typeof e?.modelProvider === "string" && typeof e.model === "string") {
+        return { provider: e.modelProvider, model: e.model };
+      }
+    } catch {
+      // No session row: the outcome simply carries no runtime.
+    }
+    return undefined;
+  }
+
+  /** The newest ledger row for a run: the remembered agent first, else a scan. */
+  private async findRow(
+    runId: string,
+  ): Promise<{ row: TaskRunView; agent: string } | undefined> {
+    const known = this.owners.get(runId);
+    const candidates = known ? [known] : this.o.agents;
+    let best: { row: TaskRunView; agent: string } | undefined;
+    for (const agent of candidates) {
+      const rows = await this.api.runtime.tasks.runs
+        .bindSession({ sessionKey: `agent:${agent}:main` })
+        .list();
+      for (const row of rows) {
+        if (row.runId !== runId) continue;
+        if (!best || row.createdAt > best.row.createdAt) best = { row, agent };
+      }
+    }
+    return best;
   }
 
   async deliver(_sessionKey: string, _message: string): Promise<void> {
@@ -94,4 +204,36 @@ export class OpenClawAdapter implements HarnessAdapter {
       `pinning a model needs plugins.entries.${this.api.id}.subagent.allowModelOverride: true and the model listed in agents.defaults.modelPolicy.allow. OpenClaw said: ${text}`,
     );
   }
+}
+
+function obj(v: unknown): Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : {};
+}
+
+function num(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+/** An agent's config entry, from the `entries` map or the older `list` array. */
+function agentEntry(agents: Record<string, unknown>, id: string): unknown {
+  const entries = agents.entries;
+  if (
+    typeof entries === "object" &&
+    entries !== null &&
+    !Array.isArray(entries)
+  ) {
+    const e = (entries as Record<string, unknown>)[id];
+    if (e !== undefined) return e;
+  }
+  const list = Array.isArray(agents.list) ? agents.list : [];
+  return list.find((a) => obj(a).id === id);
+}
+
+function alsoAllow(entry: unknown): string[] | undefined {
+  const v = obj(obj(entry).tools).alsoAllow;
+  return Array.isArray(v)
+    ? v.filter((x): x is string => typeof x === "string")
+    : undefined;
 }

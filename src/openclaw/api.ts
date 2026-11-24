@@ -91,6 +91,7 @@ export interface Runtime {
       getSessionEntry(p: {
         agentId: string;
         sessionKey: string;
+        readConsistency?: "latest";
       }): SessionEntry | undefined | Promise<SessionEntry | undefined>;
     };
   };
