@@ -192,13 +192,13 @@ describe("gate buttons", () => {
     ]);
   });
 
-  test("a press from an operator resolves the gate with resolved_by telegram:<chat>", async () => {
+  test("a press from an operator resolves the gate with resolved_by telegram:<sender>", async () => {
     const r = rig();
     const { runId, id } = await openGate(r);
     const p = press(`${id}:0`);
     expect(await handle(r, p)).toEqual({ handled: true });
     expect(r.plugin.engine.status(runId).run.status).toBe("completed");
-    expect(resolvedBy(r, runId)).toBe(`telegram:${CHAT}`);
+    expect(resolvedBy(r, runId)).toBe(`telegram:${OPERATOR}`);
     expect(p.replies).toHaveLength(1);
     expect(p.replies[0]).toContain("approve");
   });
@@ -245,7 +245,7 @@ describe("gate buttons", () => {
 
     // Once resolved, a second press is answered with the engine's reason.
     await handle(r, press(`${id}:1`));
-    expect(resolvedBy(r, runId)).toBe(`telegram:${CHAT}`);
+    expect(resolvedBy(r, runId)).toBe(`telegram:${OPERATOR}`);
     expect(r.plugin.engine.status(runId).run.status).toBe("failed");
     const late = press(`${id}:0`);
     await handle(r, late);

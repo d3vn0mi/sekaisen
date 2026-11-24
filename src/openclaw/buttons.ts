@@ -54,7 +54,7 @@ const NOT_ALLOWED = "not allowed";
  * match. A press resolves the gate only when OpenClaw says the sender is
  * authorised and the sender is in `operatorIds`; the outcome is read by
  * index from the gate row in the store, and `resolved_by` is
- * `<channel>:<chatId>`.
+ * `<channel>:<senderId>`, the operator who pressed.
  */
 export function gateButtons(o: GateButtonOptions): GateButtons {
   return {
@@ -149,7 +149,7 @@ export function gateButtons(o: GateButtonOptions): GateButtons {
         if (outcome === undefined) {
           return `no outcome ${index} for stage run ${stageRunId}; it has ${gate.outcomes.length}`;
         }
-        await engine.resolveGate(stageRunId, outcome, `${o.channel}:${chatId}`);
+        await engine.resolveGate(stageRunId, outcome, `${o.channel}:${sender}`);
         return `Answered ${outcome} for stage run ${stageRunId}.`;
       };
 
