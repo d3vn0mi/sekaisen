@@ -22,6 +22,10 @@
       "types": "./dist/mcp/server.d.ts",
       "default": "./dist/mcp/server.js"
     },
+    "./openclaw": {
+      "types": "./dist/openclaw/index.d.ts",
+      "default": "./dist/openclaw/index.js"
+    },
     "./schema.json": "./dist/format/schema.json"
   },
   "files": [
@@ -36,7 +40,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome check .",
     "test": "vitest run",
-    "ci:local": "npm run typecheck && npm run lint && npm test && npm run build"
+    "ci:local": "npm run typecheck && npm run lint && npm test && npm run build",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "yaml": "2.9.1"
@@ -47,5 +52,13 @@
     "ajv": "8.20.0",
     "typescript": "7.0.2",
     "vitest": "5.1.1"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.9.2"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
   }
 }

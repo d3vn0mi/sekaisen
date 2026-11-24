@@ -72,7 +72,7 @@ test("the package root names the types its own signatures use", () => {
   expect(names).toBeUndefined();
 });
 
-test("package.json exports the root, the MCP server and the schema", () => {
+test("package.json exports the root, the MCP server, the OpenClaw adapter and the schema", () => {
   const pkg = JSON.parse(readFileSync("package.json", "utf8"));
   expect(pkg.exports).toEqual({
     ".": { types: "./dist/index.d.ts", default: "./dist/index.js" },
@@ -80,6 +80,19 @@ test("package.json exports the root, the MCP server and the schema", () => {
       types: "./dist/mcp/server.d.ts",
       default: "./dist/mcp/server.js",
     },
+    "./openclaw": {
+      types: "./dist/openclaw/index.d.ts",
+      default: "./dist/openclaw/index.js",
+    },
     "./schema.json": "./dist/format/schema.json",
   });
+});
+
+test("the OpenClaw subpath exports the adapter and stays out of the root", async () => {
+  const sub = await import("../../src/openclaw/index.js");
+  expect(Object.keys(sub).sort()).toEqual(["OpenClawAdapter"]);
+  expect(Object.keys(root)).not.toContain("OpenClawAdapter");
+  const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+  expect(pkg.dependencies).toEqual({ yaml: pkg.dependencies.yaml });
+  expect(pkg.peerDependenciesMeta.openclaw.optional).toBe(true);
 });
