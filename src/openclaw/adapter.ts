@@ -198,6 +198,22 @@ export class OpenClawAdapter implements HarnessAdapter {
     return best;
   }
 
+  /**
+   * Cancels the run's task in its owner's ledger. True only when OpenClaw
+   * cancelled it; a task already terminal keeps its real ending.
+   */
+  async abortTurn(runId: string): Promise<boolean> {
+    const found = await this.findRow(runId);
+    if (!found) return false;
+    const cfg = await this.api.runtime.config.current();
+    const r = await this.api.runtime.tasks.runs
+      .bindSession({ sessionKey: `agent:${found.agent}:main` })
+      .cancel({ taskId: found.row.id, cfg });
+    if (r?.cancelled !== true) return false;
+    this.aborted.add(runId);
+    return true;
+  }
+
   async deliver(_sessionKey: string, _message: string): Promise<void> {
     throw new Error("deliver is not supported by the OpenClaw adapter");
   }

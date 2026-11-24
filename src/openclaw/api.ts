@@ -61,7 +61,12 @@ export interface SubagentRunParams {
 
 export interface TaskRunBinding {
   list(): TaskRunView[] | Promise<TaskRunView[]>;
-  cancel(p: { taskId: string; cfg: unknown }): Promise<unknown>;
+  cancel(p: { taskId: string; cfg: unknown }): Promise<{
+    found: boolean;
+    cancelled: boolean;
+    reason?: string;
+    task?: unknown;
+  }>;
 }
 
 export interface OutboundAdapter {

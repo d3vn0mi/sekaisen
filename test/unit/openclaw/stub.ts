@@ -33,6 +33,12 @@ export interface Stub {
   /** Wait results by run id. */
   waits: Map<string, AgentWaitResult>;
   config: Record<string, unknown>;
+  /** What `cancel` answers; a function can throw. */
+  cancelResult:
+    | { found: boolean; cancelled: boolean; reason?: string }
+    | (() => never);
+  /** Every `runtime.gateway.request` call; the adapter must make none. */
+  gatewayCalls: unknown[];
   /** Makes the next `subagent.run` throw this. */
   failRun?: Error;
 }
@@ -48,6 +54,8 @@ export function makeStub(id = "demo-plugin"): Stub {
     sessions: new Map(),
     waits: new Map(),
     config: {},
+    cancelResult: { found: true, cancelled: true },
+    gatewayCalls: [],
   };
   s.api = {
     id,
@@ -81,7 +89,9 @@ export function makeStub(id = "demo-plugin"): Stub {
               list: () => s.ledgers.get(sessionKey) ?? [],
               async cancel({ taskId, cfg }) {
                 s.cancels.push({ ownerKey: sessionKey, taskId, cfg });
-                return { cancelled: true };
+                return typeof s.cancelResult === "function"
+                  ? s.cancelResult()
+                  : s.cancelResult;
               },
             };
           },
@@ -107,6 +117,13 @@ export function makeStub(id = "demo-plugin"): Stub {
     registerService() {},
     registerTool() {},
     registerInteractiveHandler() {},
+  };
+  // Not part of the typed surface: a spy that proves the adapter never reaches for it.
+  (s.api.runtime as unknown as Record<string, unknown>).gateway = {
+    async request(...args: unknown[]) {
+      s.gatewayCalls.push(args);
+      return {};
+    },
   };
   return s;
 }
