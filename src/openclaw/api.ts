@@ -1,7 +1,8 @@
 /**
- * The parts of the OpenClaw plugin API this adapter uses, described
- * structurally so the package loads and type-checks without OpenClaw
- * installed. Only members the adapter touches are listed; the shapes were
+ * The parts of the OpenClaw plugin API this adapter and the plugin helper
+ * use, described structurally so the package loads and type-checks without
+ * OpenClaw installed. Only members they touch are listed, optional where
+ * OpenClaw's are, so OpenClaw's own types assign to these; the shapes were
  * recorded from a running gateway.
  */
 
@@ -69,14 +70,23 @@ export interface TaskRunBinding {
   }>;
 }
 
+/** What a gate prompt is sent with. */
+export interface OutboundPayload {
+  cfg: unknown;
+  to: string;
+  text: string;
+  accountId?: string | null;
+  payload: unknown;
+}
+
+/**
+ * A method type compared bivariantly, as TypeScript compares methods, so
+ * OpenClaw's adapter (whose `cfg` is its own config type) still fits.
+ */
+type Bivariant<P, R> = { bivariant(p: P): R }["bivariant"];
+
 export interface OutboundAdapter {
-  sendPayload?(p: {
-    cfg: unknown;
-    to: string;
-    text: string;
-    accountId?: string;
-    payload: unknown;
-  }): Promise<unknown>;
+  sendPayload?: Bivariant<OutboundPayload, Promise<unknown>>;
 }
 
 export interface Runtime {
@@ -117,6 +127,8 @@ export interface ServiceDefinition {
 
 export interface ToolDefinition {
   name: string;
+  /** Shown in OpenClaw's UI; OpenClaw's own tool type requires it. */
+  label?: string;
   description: string;
   parameters: unknown;
   execute(id: string, params: unknown): Promise<unknown>;
@@ -126,6 +138,34 @@ export type ToolFactory = (
   ctx: ToolContext,
 ) => ToolDefinition | ToolDefinition[] | null | undefined;
 
+/**
+ * How a tool is registered. OpenClaw records `name` (or `names`) and refuses
+ * one the host plugin's manifest does not declare under `contracts.tools`.
+ */
+export interface ToolOptions {
+  name?: string;
+  names?: string[];
+  optional?: boolean;
+}
+
+/**
+ * What an interactive handler is told about a button press, as Telegram
+ * reports it. OpenClaw has already split the callback data at its first
+ * colon into `namespace` and `payload`.
+ */
+export interface InteractiveContext {
+  channel?: string;
+  senderId?: string;
+  auth?: { isAuthorizedSender?: boolean };
+  callback: {
+    data?: string;
+    namespace?: string;
+    payload: string;
+    chatId: string;
+  };
+  respond: { reply(p: { text: string }): Promise<void> };
+}
+
 export interface InteractiveHandlerDefinition {
   channel: string;
   namespace: string;
@@ -134,10 +174,10 @@ export interface InteractiveHandlerDefinition {
 
 export interface PluginApi {
   id: string;
-  pluginConfig: unknown;
+  pluginConfig?: unknown;
   runtime: Runtime;
   logger: Logger;
   registerService(service: ServiceDefinition): void;
-  registerTool(tool: ToolDefinition | ToolFactory, opts?: unknown): void;
+  registerTool(tool: ToolDefinition | ToolFactory, opts?: ToolOptions): void;
   registerInteractiveHandler(h: InteractiveHandlerDefinition): void;
 }

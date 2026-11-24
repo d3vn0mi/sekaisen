@@ -1,8 +1,15 @@
 import type {
   AgentWaitResult,
+  InteractiveHandlerDefinition,
+  OutboundAdapter,
+  OutboundPayload,
   PluginApi,
+  ServiceDefinition,
   SessionEntry,
   TaskRunView,
+  ToolDefinition,
+  ToolFactory,
+  ToolOptions,
 } from "../../../src/openclaw/api.js";
 
 export interface RunCall {
@@ -19,8 +26,20 @@ export interface CancelCall {
   cfg: unknown;
 }
 
+export type SendCall = OutboundPayload;
+
 export interface Stub {
   api: PluginApi;
+  services: ServiceDefinition[];
+  tools: Array<{ tool: ToolDefinition | ToolFactory; opts?: ToolOptions }>;
+  handlers: InteractiveHandlerDefinition[];
+  /** Every `sendPayload` call the default outbound adapter received. */
+  sent: SendCall[];
+  /** Channels `loadAdapter` was asked for. */
+  loaded: string[];
+  /** What `loadAdapter` returns; the default records into `sent`. */
+  outbound: OutboundAdapter | undefined;
+  warnings: string[];
   /** Every runtime call, by name, in order. */
   calls: string[];
   runs: RunCall[];
@@ -46,6 +65,13 @@ export interface Stub {
 export function makeStub(id = "demo-plugin"): Stub {
   const s: Stub = {
     api: undefined as unknown as PluginApi,
+    services: [],
+    tools: [],
+    handlers: [],
+    sent: [],
+    loaded: [],
+    outbound: undefined,
+    warnings: [],
     calls: [],
     runs: [],
     cancels: [],
@@ -57,10 +83,22 @@ export function makeStub(id = "demo-plugin"): Stub {
     cancelResult: { found: true, cancelled: true },
     gatewayCalls: [],
   };
+  s.outbound = {
+    async sendPayload(p) {
+      s.sent.push(p);
+      return { messageId: s.sent.length };
+    },
+  };
   s.api = {
     id,
     pluginConfig: {},
-    logger: { info() {}, warn() {}, error() {} },
+    logger: {
+      info() {},
+      warn(message) {
+        s.warnings.push(message);
+      },
+      error() {},
+    },
     runtime: {
       config: {
         current() {
@@ -107,16 +145,23 @@ export function makeStub(id = "demo-plugin"): Stub {
       },
       channel: {
         outbound: {
-          loadAdapter() {
+          loadAdapter(channel) {
             s.calls.push("channel.outbound.loadAdapter");
-            return { async sendPayload() {} };
+            s.loaded.push(channel);
+            return s.outbound;
           },
         },
       },
     },
-    registerService() {},
-    registerTool() {},
-    registerInteractiveHandler() {},
+    registerService(service) {
+      s.services.push(service);
+    },
+    registerTool(tool, opts) {
+      s.tools.push(opts === undefined ? { tool } : { tool, opts });
+    },
+    registerInteractiveHandler(h) {
+      s.handlers.push(h);
+    },
   };
   // Not part of the typed surface: a spy that proves the adapter never reaches for it.
   (s.api.runtime as unknown as Record<string, unknown>).gateway = {

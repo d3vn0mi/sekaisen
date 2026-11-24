@@ -88,10 +88,16 @@ test("package.json exports the root, the MCP server, the OpenClaw adapter and th
   });
 });
 
-test("the OpenClaw subpath exports the adapter and stays out of the root", async () => {
+test("the OpenClaw subpath exports the adapter and plugin helpers and stays out of the root", async () => {
   const sub = await import("../../src/openclaw/index.js");
-  expect(Object.keys(sub).sort()).toEqual(["OpenClawAdapter"]);
-  expect(Object.keys(root)).not.toContain("OpenClawAdapter");
+  expect(Object.keys(sub).sort()).toEqual([
+    "OpenClawAdapter",
+    "createPipelinePlugin",
+    "gateButtons",
+  ]);
+  for (const name of Object.keys(sub)) {
+    expect(Object.keys(root)).not.toContain(name);
+  }
   const pkg = JSON.parse(readFileSync("package.json", "utf8"));
   expect(pkg.dependencies).toEqual({ yaml: pkg.dependencies.yaml });
   expect(pkg.peerDependenciesMeta.openclaw.optional).toBe(true);
