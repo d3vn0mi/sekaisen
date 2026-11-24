@@ -645,6 +645,36 @@ describe("registration modes and one engine per store", () => {
     expect(a.engine.status(runId).run.status).toBe("input_required");
   });
 
+  test("a failed re-registration keeps the buttons installed before", async () => {
+    const storePath = tempStore();
+    const definitions = held();
+    const first = makeStub();
+    const a = await register(first, {
+      storePath,
+      definitions,
+      buttons: { channel: "telegram", to: "telegram:1", operatorIds: ["1"] },
+    });
+    const broken = makeStub();
+    broken.api.registerTool = () => {
+      throw new Error("registration refused");
+    };
+    await expect(
+      register(broken, {
+        storePath,
+        definitions,
+        buttons: { channel: "telegram", to: "telegram:2", operatorIds: ["2"] },
+      }),
+    ).rejects.toThrow("registration refused");
+    expect(broken.handlers).toEqual([]);
+    const { runId, id } = await openHeld(a);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    expect(first.sent).toHaveLength(1);
+    expect(broken.sent).toHaveLength(0);
+    const answered = await pressFirst(first.handlers[0], id, "1");
+    expect(answered[0]).toContain("approve");
+    expect(a.engine.status(runId).run.status).toBe("completed");
+  });
+
   test("a re-registration with another token secret is refused", async () => {
     const storePath = tempStore();
     const a = await register(makeStub(), { storePath });

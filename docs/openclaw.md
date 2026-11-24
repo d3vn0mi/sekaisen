@@ -87,7 +87,8 @@ Two settings are not left to the first registration:
 - **`buttons`.** The buttons installed before are retired. Their handler, which OpenClaw may keep
   registered, answers every press "not allowed" and changes nothing. The new registration's buttons,
   if it has any, are installed on its own `api`, so a gate is posted once and only the new
-  `operatorIds` can answer it. A registration without `buttons` leaves none.
+  `operatorIds` can answer it. A registration without `buttons` leaves none. The swap comes last, so
+  a registration that fails keeps the buttons it would have replaced.
 
 ### Adapter options
 
@@ -178,8 +179,9 @@ the task whose run id matches (the newest, if several do) and cancels it. A plug
 gateway's own abort, so there is nothing else to call.
 
 The owner session is `agent:<id>:<mainKey>`, built as OpenClaw builds it: `<mainKey>` is the config's
-`session.mainKey`, trimmed and lowercased, or `main` when it is unset or blank, and the agent id is
-lowercased. Reads use the same key. Pass `ownerKey(agent)` to name it yourself.
+`session.mainKey`, trimmed and lowercased, or `main` when it is unset or blank. The agent id is
+normalised as OpenClaw normalises it: lowercased, with any run of characters outside `[a-z0-9_-]`
+turned into `-`. Reads use the same key. Pass `ownerKey(agent)` to name it yourself.
 
 A run the adapter cancelled reads `ended` / `killed`, never `error`, although OpenClaw reports such
 a run as an error.

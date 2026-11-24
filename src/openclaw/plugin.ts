@@ -211,8 +211,10 @@ export function createPipelinePlugin(o: PipelinePluginOptions): PipelinePlugin {
         `store ${o.storePath} already has an engine in this process built with a different tokenSecret; close it first`,
       );
     }
-    reregister(o, cached);
-    return registerTools(o, key, cached);
+    registerService(o, cached);
+    const plugin = registerTools(o, key, cached);
+    swapButtons(o, cached);
+    return plugin;
   }
 
   const adapter =
@@ -223,6 +225,7 @@ export function createPipelinePlugin(o: PipelinePluginOptions): PipelinePlugin {
   try {
     const entry = host(o, adapter, store);
     const plugin = registerTools(o, key, entry);
+    swapButtons(o, entry);
     if (key !== undefined) hosted.set(key, entry);
     return plugin;
   } catch (err) {
@@ -231,7 +234,7 @@ export function createPipelinePlugin(o: PipelinePluginOptions): PipelinePlugin {
   }
 }
 
-/** Builds the engine on `store` and registers its service and buttons. */
+/** Builds the engine on `store` and registers its service. */
 function host(
   o: PipelinePluginOptions,
   adapter: OpenClawAdapter,
@@ -251,31 +254,37 @@ function host(
     store,
     secret: fingerprint(o.tokenSecret),
   };
-  reregister(o, entry);
+  registerService(o, entry);
   return entry;
 }
 
-/** Registers the service and, with `buttons`, the gate buttons on `o.api`. */
-function reregister(o: PipelinePluginOptions, entry: Hosted): void {
-  const { api } = o;
-  const { engine, store } = entry;
-  // Listeners first: the start-up reconcile can already emit a reminder.
-  // A re-registration retires the buttons installed before, whose handler
-  // then refuses every press, and installs its own if it has any, so a
-  // gate is posted once and only the newest operators answer it.
-  entry.buttons?.dispose();
-  entry.buttons = undefined;
-  if (o.buttons) {
-    entry.buttons = gateButtons(o.buttons).install({ api, engine, store });
-  }
-
+/** Registers the service that starts and stops the engine on `o.api`. */
+function registerService(o: PipelinePluginOptions, entry: Hosted): void {
+  const { engine } = entry;
   // Stop leaves the store open: OpenClaw may start the service again
   // without building the plugin anew.
-  api.registerService({
+  o.api.registerService({
     id: o.serviceId ?? "sekaisen",
     start: () => engine.start(),
     stop: () => engine.stop(),
   });
+}
+
+/**
+ * Installs `o.buttons` on `o.api` and retires the buttons installed
+ * before, whose handler then refuses every press, so a gate is posted once
+ * and only the newest operators answer it. Called last, once every other
+ * registration succeeded, so a failed registration keeps the old buttons.
+ * The engine starts only from the service, so its first events still find
+ * the listeners in place.
+ */
+function swapButtons(o: PipelinePluginOptions, entry: Hosted): void {
+  const { engine, store } = entry;
+  const next = o.buttons
+    ? gateButtons(o.buttons).install({ api: o.api, engine, store })
+    : undefined;
+  entry.buttons?.dispose();
+  entry.buttons = next;
 }
 
 /**
