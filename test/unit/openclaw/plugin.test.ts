@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { VirtualClock } from "../../../src/engine/clock.js";
 import { createRegistry } from "../../../src/host/registry.js";
 import type {
+  InteractiveHandlerDefinition,
   PluginApi,
   ToolContext,
   ToolDefinition,
@@ -378,6 +379,66 @@ describe("createPipelinePlugin", () => {
 });
 
 describe("registration modes and one engine per store", () => {
+  /** A pipeline that is one operator gate between start and an end. */
+  function held(): SwapSource {
+    return new SwapSource(
+      inline({
+        id: "held",
+        start: "publish",
+        stages: {
+          publish: {
+            type: "gate",
+            who: "operator",
+            prompt: "Publish?",
+            timeout: 3_600_000,
+            onTimeout: { remind: 600_000 },
+            outcomes: { approve: { next: "done" } },
+          },
+          done: { type: "end", status: "completed" },
+        },
+      }),
+    );
+  }
+
+  /** Presses the gate's first button through `handler`, as `senderId`; the reply. */
+  async function pressFirst(
+    handler: InteractiveHandlerDefinition | undefined,
+    stageRunId: string,
+    senderId: string,
+  ): Promise<string[]> {
+    if (!handler) throw new Error("no interactive handler");
+    const replies: string[] = [];
+    await handler.handler({
+      channel: "telegram",
+      senderId,
+      auth: { isAuthorizedSender: true },
+      callback: {
+        data: `sekaisen:${stageRunId}:0`,
+        namespace: "sekaisen",
+        payload: `${stageRunId}:0`,
+        chatId: senderId,
+      },
+      respond: {
+        async reply(p: { text: string }) {
+          replies.push(p.text);
+        },
+      },
+    });
+    return replies;
+  }
+
+  /** Opens the held gate; its stage run id. */
+  async function openHeld(plugin: PipelinePlugin): Promise<{
+    runId: string;
+    id: string;
+  }> {
+    const { runId } = await plugin.engine.startRun("held", {});
+    await plugin.engine.tick();
+    const id = plugin.engine.status(runId).live?.stageRunId;
+    if (!id) throw new Error("no gate open");
+    return { runId, id };
+  }
+
   function tempStore(): string {
     const dir = mkdtempSync(join(tmpdir(), "sekaisen-plugin-"));
     dirs.push(dir);
@@ -520,23 +581,7 @@ describe("registration modes and one engine per store", () => {
       to: "telegram:1",
       operatorIds: ["1"],
     };
-    const definitions = new SwapSource(
-      inline({
-        id: "held",
-        start: "publish",
-        stages: {
-          publish: {
-            type: "gate",
-            who: "operator",
-            prompt: "Publish?",
-            timeout: 3_600_000,
-            onTimeout: { remind: 600_000 },
-            outcomes: { approve: { next: "done" } },
-          },
-          done: { type: "end", status: "completed" },
-        },
-      }),
-    );
+    const definitions = held();
     const first = makeStub();
     const a = await register(first, { storePath, buttons, definitions });
     const second = makeStub();
@@ -547,6 +592,79 @@ describe("registration modes and one engine per store", () => {
     for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
     expect(first.sent).toHaveLength(0);
     expect(second.sent).toHaveLength(1);
+  });
+
+  test("a re-registration's buttons replace the old ones, whose handler then refuses every press", async () => {
+    const storePath = tempStore();
+    const definitions = held();
+    const first = makeStub();
+    const a = await register(first, {
+      storePath,
+      definitions,
+      buttons: { channel: "telegram", to: "telegram:1", operatorIds: ["1"] },
+    });
+    const second = makeStub();
+    await register(second, {
+      storePath,
+      definitions,
+      buttons: { channel: "telegram", to: "telegram:2", operatorIds: ["2"] },
+    });
+    const { runId, id } = await openHeld(a);
+    // Only the old list had "1"; the old handler no longer answers for it.
+    expect(await pressFirst(first.handlers[0], id, "1")).toEqual([
+      "not allowed",
+    ]);
+    expect(await pressFirst(second.handlers[0], id, "1")).toEqual([
+      "not allowed",
+    ]);
+    expect(a.engine.status(runId).run.status).toBe("input_required");
+    // The new operator answers through the new handler.
+    const answered = await pressFirst(second.handlers[0], id, "2");
+    expect(answered[0]).toContain("approve");
+    expect(a.engine.status(runId).run.status).toBe("completed");
+  });
+
+  test("a re-registration without buttons retires the old ones", async () => {
+    const storePath = tempStore();
+    const definitions = held();
+    const first = makeStub();
+    const a = await register(first, {
+      storePath,
+      definitions,
+      buttons: { channel: "telegram", to: "telegram:1", operatorIds: ["1"] },
+    });
+    const second = makeStub();
+    await register(second, { storePath, definitions });
+    expect(second.handlers).toEqual([]);
+    const { runId, id } = await openHeld(a);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    expect(first.sent).toHaveLength(0);
+    expect(await pressFirst(first.handlers[0], id, "1")).toEqual([
+      "not allowed",
+    ]);
+    expect(a.engine.status(runId).run.status).toBe("input_required");
+  });
+
+  test("a re-registration with another token secret is refused", async () => {
+    const storePath = tempStore();
+    const a = await register(makeStub(), { storePath });
+    const other = makeStub();
+    await expect(
+      register(other, {
+        storePath,
+        tokenSecret: new Uint8Array(32).fill(8),
+      }),
+    ).rejects.toThrow(/different tokenSecret/);
+    // Refused before anything was registered; the running engine is kept.
+    expect(other.services).toEqual([]);
+    expect(other.tools).toEqual([]);
+    expect(isOpen(opened.at(-1))).toBe(true);
+    // The same secret, in a fresh copy, is accepted.
+    const b = await register(makeStub(), {
+      storePath,
+      tokenSecret: Uint8Array.from(SECRET),
+    });
+    expect(b.engine).toBe(a.engine);
   });
 
   test("a failed re-registration leaves the shared store open", async () => {

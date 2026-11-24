@@ -25,6 +25,8 @@ Pre-0.1. Nothing is installable yet.
     registration modes register the tools alone, and their calls reach the engine a full registration
     started. One engine runs per store file in a process, and `plugin.close()` stops it and closes the
     store. The adapter options may leave out `api`.
+  - A later registration of the same store with a different `tokenSecret` throws. One that reuses the
+    engine retires the gate buttons installed before; their handler then refuses every press.
   - A model-pin refusal at the end of a run is reported like one at its start, naming both settings.
     A run the adapter started that has no task row yet is checked with `waitForRun`.
   - A successful run's summary is no longer reported as its error.

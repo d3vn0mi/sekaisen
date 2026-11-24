@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import {
   type CompletionTool,
@@ -151,11 +152,17 @@ interface Hosted {
   store: Store;
   /** The gate buttons installed on the newest registration's api. */
   buttons?: Disposable;
+  /** A SHA-256 of the token secret the engine was built with; never the bytes. */
+  secret: string;
   closed?: boolean;
 }
 
 /** The engines this process runs, by resolved store path. */
 const hosted = new Map<string, Hosted>();
+
+function fingerprint(secret: Uint8Array): string {
+  return createHash("sha256").update(secret).digest("hex");
+}
 
 /** The cache key for a store path; an in-memory store is never shared. */
 function storeKey(storePath: string): string | undefined {
@@ -198,6 +205,12 @@ export function createPipelinePlugin(o: PipelinePluginOptions): PipelinePlugin {
 
   const cached = key === undefined ? undefined : hosted.get(key);
   if (cached) {
+    // Reusing the engine would keep the first secret without a word.
+    if (cached.secret !== fingerprint(o.tokenSecret)) {
+      throw new Error(
+        `store ${o.storePath} already has an engine in this process built with a different tokenSecret; close it first`,
+      );
+    }
     reregister(o, cached);
     return registerTools(o, key, cached);
   }
@@ -232,7 +245,12 @@ function host(
     definitions: o.definitions,
     tokenSecret: o.tokenSecret,
   });
-  const entry: Hosted = { engine, adapter, store };
+  const entry: Hosted = {
+    engine,
+    adapter,
+    store,
+    secret: fingerprint(o.tokenSecret),
+  };
   reregister(o, entry);
   return entry;
 }
@@ -242,10 +260,12 @@ function reregister(o: PipelinePluginOptions, entry: Hosted): void {
   const { api } = o;
   const { engine, store } = entry;
   // Listeners first: the start-up reconcile can already emit a reminder.
-  // A re-registration moves the buttons to the new api, so a gate is
-  // posted once.
+  // A re-registration retires the buttons installed before, whose handler
+  // then refuses every press, and installs its own if it has any, so a
+  // gate is posted once and only the newest operators answer it.
+  entry.buttons?.dispose();
+  entry.buttons = undefined;
   if (o.buttons) {
-    entry.buttons?.dispose();
     entry.buttons = gateButtons(o.buttons).install({ api, engine, store });
   }
 

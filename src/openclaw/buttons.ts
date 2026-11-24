@@ -26,6 +26,8 @@ export interface GateButtons {
   /**
    * Registers the press handler and posts every `gate` and `gate_reminder`
    * event. Install before the engine starts: start-up can emit a reminder.
+   * Disposing stops the posts, and the handler, which OpenClaw may keep
+   * registered, then refuses every press and changes nothing.
    */
   install(host: GateButtonHost): Disposable;
 }
@@ -59,6 +61,7 @@ const NOT_ALLOWED = "not allowed";
 export function gateButtons(o: GateButtonOptions): GateButtons {
   return {
     install({ api, engine, store }) {
+      let disposed = false;
       const warn = (message: string) => {
         try {
           api.logger.warn(message);
@@ -121,6 +124,7 @@ export function gateButtons(o: GateButtonOptions): GateButtons {
       };
 
       const answer = async (ctx: InteractiveContext): Promise<string> => {
+        if (disposed) return NOT_ALLOWED;
         const sender = ctx.senderId;
         if (
           ctx.auth?.isAuthorizedSender !== true ||
@@ -175,6 +179,7 @@ export function gateButtons(o: GateButtonOptions): GateButtons {
       ];
       return {
         dispose() {
+          disposed = true;
           for (const s of subs) s.dispose();
         },
       };

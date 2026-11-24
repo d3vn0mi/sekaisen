@@ -75,10 +75,19 @@ of them make `api.runtime` unusable.
   whose handler reads `plugin.engine` works from either load.
 
 One engine runs per store file in a process. A later full registration with the same `storePath`
-reuses it. It registers the service, the tools and the buttons again on its own `api`, and moves the
-buttons there, so a gate is still posted once. The options of that later registration that build an
-engine (`adapter`, `definitions`, `registry`, `tokenSecret`, `engine`) are ignored. An in-memory
-store (`":memory:"`) is never shared.
+reuses it. It registers the service and the tools again on its own `api`. The options of that later
+registration that build an engine (`adapter`, `definitions`, `registry`, `engine`) are ignored. An
+in-memory store (`":memory:"`) is never shared.
+
+Two settings are not left to the first registration:
+
+- **`tokenSecret`.** A later registration with a different secret throws, and registers nothing. The
+  engine keeps a SHA-256 of the secret to compare, never the bytes. To change the secret, call
+  `plugin.close()` first.
+- **`buttons`.** The buttons installed before are retired. Their handler, which OpenClaw may keep
+  registered, answers every press "not allowed" and changes nothing. The new registration's buttons,
+  if it has any, are installed on its own `api`, so a gate is posted once and only the new
+  `operatorIds` can answer it. A registration without `buttons` leaves none.
 
 ### Adapter options
 
