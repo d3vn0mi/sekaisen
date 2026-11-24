@@ -5,7 +5,7 @@ import type {
   StartTurn,
 } from "../adapter/types.js";
 import { refusalLine } from "../engine/classify.js";
-import type { PluginApi, TaskRunView } from "./api.js";
+import type { AgentWaitResult, PluginApi, TaskRunView } from "./api.js";
 
 export interface AdapterOptions {
   api: PluginApi;
@@ -13,6 +13,12 @@ export interface AdapterOptions {
   agents: string[];
   /** Maps an engine session key to an OpenClaw one. */
   sessionKey?(engineKey: string, agent: string): string;
+  /**
+   * The session that owns an agent's runs in the task ledger. By default
+   * `agent:<id>:<mainKey>`, built as OpenClaw builds it from
+   * `session.mainKey` (`"main"` when unset).
+   */
+  ownerKey?(agent: string): string;
   /** Pins a provider and model, by agent. Opt-in. */
   pin?: Record<string, { provider: string; model: string }>;
   turnCapMs?: number;
@@ -22,13 +28,25 @@ export interface AdapterOptions {
 
 const NOT_TRUSTED = "not trusted for fallback provider/model override requests";
 const NOT_ALLOWED = "by agents.defaults.modelPolicy.allow";
+/** OpenClaw's stop reason and error text for a turn cut by a gateway restart. */
+const RESTART_STOP_REASON = "restart";
+const RESTART_ABORT_ERROR = "agent run aborted for restart";
 
-/** The default mapping from the engine's session keys to OpenClaw's. */
+/**
+ * The default mapping from the engine's session keys to OpenClaw's. A
+ * project name is lowercased and every character outside `[a-z0-9_-]`
+ * becomes `-`.
+ */
 export function defaultSessionKey(engineKey: string, agent: string): string {
   const run = /^run:([^:]+):.+$/.exec(engineKey);
   if (run) return `agent:${agent}:pipe-${run[1]}`.toLowerCase();
   const project = /^project:(.+):[^:]+$/.exec(engineKey);
-  if (project) return `agent:${agent}:proj-${project[1]}`.toLowerCase();
+  if (project) {
+    const name = (project[1] as string)
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, "-");
+    return `agent:${agent}:proj-${name}`.toLowerCase();
+  }
   throw new Error(
     `unrecognised session key "${engineKey}": expected run:<id>:<agent> or project:<name>:<agent>`,
   );
@@ -42,7 +60,7 @@ export class OpenClawAdapter implements HarnessAdapter {
   protected readonly aborted = new Set<string>();
 
   constructor(o: AdapterOptions) {
-    this.o = o;
+    this.o = { ...o, agents: [...o.agents] };
     this.api = o.api;
   }
 
@@ -108,13 +126,15 @@ export class OpenClawAdapter implements HarnessAdapter {
       this.owners.set(r.runId, p.agent);
       return { runId: r.runId };
     } catch (e) {
-      throw this.rewriteRefusal(e);
+      const text = e instanceof Error ? e.message : String(e);
+      const rewritten = this.rewriteRefusal(text);
+      throw rewritten === text ? e : new Error(rewritten);
     }
   }
 
   async readRunOutcome(runId: string): Promise<RunOutcome> {
     const found = await this.findRow(runId);
-    if (!found) return { state: "unknown" };
+    if (!found) return this.readUnlisted(runId);
     const { row, agent } = found;
     if (row.status === "queued" || row.status === "running") {
       return { state: "running" };
@@ -132,14 +152,24 @@ export class OpenClawAdapter implements HarnessAdapter {
             ? "killed"
             : "error";
 
-    const waited = await this.waitText(runId);
-    const texts = [waited, row.error, row.terminalSummary].filter(
-      (t): t is string => typeof t === "string" && t.length > 0,
-    );
-    const error = texts.find((t) => refusalLine(t) !== undefined) ?? texts[0];
+    // A success's summary is the agent's report, not an error.
+    let error: string | undefined;
+    if (ending !== "ok") {
+      const waited = await this.waitResult(runId);
+      const texts = [waited?.error, row.error, row.terminalSummary].filter(
+        (t): t is string => typeof t === "string" && t.length > 0,
+      );
+      error = texts.find((t) => refusalLine(t) !== undefined) ?? texts[0];
+      // A turn cut by a gateway restart was lost, not failed: the engine
+      // retries a lost turn. One this adapter cancelled stays killed.
+      if (!wasAborted && isRestartAbort(waited, error)) {
+        this.owners.delete(runId);
+        return { state: "unknown" };
+      }
+    }
 
     const out: RunOutcome = { state: "ended", ending };
-    if (error !== undefined) out.error = error;
+    if (error !== undefined) out.error = this.rewriteRefusal(error);
     const runtime = await this.runtimeOf(agent, row.childSessionKey);
     if (runtime) out.runtime = runtime;
     // An aborted run stays remembered so a repeat read still says killed.
@@ -147,13 +177,33 @@ export class OpenClawAdapter implements HarnessAdapter {
     return out;
   }
 
-  private async waitText(runId: string): Promise<string | undefined> {
+  /**
+   * A run with no ledger row. One this adapter dispatched may have failed
+   * before OpenClaw recorded a task, such as a refused model pin: its wait
+   * result says so. Anything else is unknown.
+   */
+  private async readUnlisted(runId: string): Promise<RunOutcome> {
+    if (!this.owners.has(runId)) return { state: "unknown" };
+    const waited = await this.waitResult(runId);
+    if (waited?.status !== "error" || isRestartAbort(waited, waited.error)) {
+      return { state: "unknown" };
+    }
+    this.owners.delete(runId);
+    const out: RunOutcome = { state: "ended", ending: "error" };
+    if (typeof waited.error === "string" && waited.error.length > 0) {
+      out.error = this.rewriteRefusal(waited.error);
+    }
+    return out;
+  }
+
+  private async waitResult(
+    runId: string,
+  ): Promise<AgentWaitResult | undefined> {
     try {
-      const w = await this.api.runtime.subagent.waitForRun({
+      return await this.api.runtime.subagent.waitForRun({
         runId,
         timeoutMs: 1,
       });
-      return typeof w?.error === "string" ? w.error : undefined;
     } catch {
       return undefined;
     }
@@ -179,20 +229,33 @@ export class OpenClawAdapter implements HarnessAdapter {
     return undefined;
   }
 
+  /**
+   * The session that owns an agent's runs: the `ownerKey` option, else the
+   * key OpenClaw builds for the agent's main session.
+   */
+  private ownerKeyOf(agent: string, cfg: unknown): string {
+    if (this.o.ownerKey) return this.o.ownerKey(agent);
+    return `agent:${normalizeAgentId(agent)}:${normalizeMainKey(obj(obj(cfg).session).mainKey)}`;
+  }
+
   /** The newest ledger row for a run: the remembered agent first, else a scan. */
   private async findRow(
     runId: string,
-  ): Promise<{ row: TaskRunView; agent: string } | undefined> {
+  ): Promise<{ row: TaskRunView; agent: string; owner: string } | undefined> {
     const known = this.owners.get(runId);
     const candidates = known ? [known] : this.o.agents;
-    let best: { row: TaskRunView; agent: string } | undefined;
+    const cfg = this.o.ownerKey ? undefined : await this.config();
+    let best: { row: TaskRunView; agent: string; owner: string } | undefined;
     for (const agent of candidates) {
+      const owner = this.ownerKeyOf(agent, cfg);
       const rows = await this.api.runtime.tasks.runs
-        .bindSession({ sessionKey: `agent:${agent}:main` })
+        .bindSession({ sessionKey: owner })
         .list();
       for (const row of rows) {
         if (row.runId !== runId) continue;
-        if (!best || row.createdAt > best.row.createdAt) best = { row, agent };
+        if (!best || row.createdAt > best.row.createdAt) {
+          best = { row, agent, owner };
+        }
       }
     }
     return best;
@@ -207,7 +270,7 @@ export class OpenClawAdapter implements HarnessAdapter {
     if (!found) return false;
     const cfg = await this.api.runtime.config.current();
     const r = await this.api.runtime.tasks.runs
-      .bindSession({ sessionKey: `agent:${found.agent}:main` })
+      .bindSession({ sessionKey: found.owner })
       .cancel({ taskId: found.row.id, cfg });
     if (r?.cancelled !== true) return false;
     this.aborted.add(runId);
@@ -218,13 +281,39 @@ export class OpenClawAdapter implements HarnessAdapter {
     throw new Error("deliver is not supported by the OpenClaw adapter");
   }
 
-  private rewriteRefusal(e: unknown): unknown {
-    const text = e instanceof Error ? e.message : String(e);
-    if (!text.includes(NOT_TRUSTED) && !text.includes(NOT_ALLOWED)) return e;
-    return new Error(
-      `pinning a model needs plugins.entries.${this.api.id}.subagent.allowModelOverride: true and the model listed in agents.defaults.modelPolicy.allow. OpenClaw said: ${text}`,
-    );
+  /** A model-pin refusal, rewritten to name both settings; other text as is. */
+  private rewriteRefusal(text: string): string {
+    if (!text.includes(NOT_TRUSTED) && !text.includes(NOT_ALLOWED)) return text;
+    return `pinning a model needs plugins.entries.${this.api.id}.subagent.allowModelOverride: true and the model listed in agents.defaults.modelPolicy.allow. OpenClaw said: ${text}`;
   }
+}
+
+/** True for a turn OpenClaw aborted because the gateway restarted. */
+function isRestartAbort(
+  waited: AgentWaitResult | undefined,
+  error: string | undefined,
+): boolean {
+  return (
+    waited?.stopReason === RESTART_STOP_REASON || error === RESTART_ABORT_ERROR
+  );
+}
+
+/** OpenClaw's main-key normalisation: trimmed, lowercased, `"main"` when blank. */
+function normalizeMainKey(v: unknown): string {
+  return (typeof v === "string" ? v.trim().toLowerCase() : "") || "main";
+}
+
+/** OpenClaw's agent-id normalisation, so the owner key matches its own. */
+function normalizeAgentId(v: string): string {
+  const trimmed = v.trim();
+  const lower = trimmed.toLowerCase();
+  if (/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(trimmed)) return lower;
+  const id = lower
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+/, "")
+    .replace(/-+$/, "")
+    .slice(0, 64);
+  return id || "main";
 }
 
 function obj(v: unknown): Record<string, unknown> {

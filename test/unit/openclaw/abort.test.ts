@@ -48,8 +48,8 @@ describe("abortTurn", () => {
     };
     expect(await a.abortTurn("run-1")).toBe(false);
     s.waits.set("run-1", ABORTED);
-    // Not marked aborted: the real ending stands.
-    expect(await a.readRunOutcome("run-1")).toMatchObject({ ending: "error" });
+    // Not marked aborted: the restart's own reading stands, not killed.
+    expect(await a.readRunOutcome("run-1")).toEqual({ state: "unknown" });
   });
 
   test("abort of a run with no row returns false", async () => {
@@ -76,7 +76,7 @@ describe("abortTurn", () => {
     await expect(a.abortTurn("run-1")).rejects.toThrow("ledger unavailable");
     s.ledgers.set(KEY, [row({ status: "failed" })]);
     s.waits.set("run-1", ABORTED);
-    expect(await a.readRunOutcome("run-1")).toMatchObject({ ending: "error" });
+    expect(await a.readRunOutcome("run-1")).toEqual({ state: "unknown" });
   });
 
   test("an aborted run later reads killed, not error", async () => {
@@ -91,14 +91,10 @@ describe("abortTurn", () => {
     expect(await a.readRunOutcome("run-1")).toMatchObject({ ending: "killed" });
   });
 
-  test("an unaborted run that ends the same way reads error", async () => {
+  test("an unaborted run that ends the same way reads unknown", async () => {
     const { s, a } = setup([row({ status: "failed" })]);
     s.waits.set("run-1", ABORTED);
-    expect(await a.readRunOutcome("run-1")).toEqual({
-      state: "ended",
-      ending: "error",
-      error: "agent run aborted for restart",
-    });
+    expect(await a.readRunOutcome("run-1")).toEqual({ state: "unknown" });
   });
 
   test("abort never calls runtime.gateway", async () => {

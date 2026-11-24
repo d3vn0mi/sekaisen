@@ -125,15 +125,11 @@ describe("readRunOutcome", () => {
     expect(await a.readRunOutcome("run-1")).toMatchObject({ ending: "killed" });
   });
 
-  test("a run nobody aborted that ends the same way reads error", async () => {
+  test("a run nobody aborted that ends the same way reads unknown, as a lost turn", async () => {
     const { a } = setup([
       row({ status: "failed", error: "agent run aborted for restart" }),
     ]);
-    expect(await a.readRunOutcome("run-1")).toEqual({
-      state: "ended",
-      ending: "error",
-      error: "agent run aborted for restart",
-    });
+    expect(await a.readRunOutcome("run-1")).toEqual({ state: "unknown" });
   });
 
   test("after a restart, a lost task reads unknown", async () => {
