@@ -1,0 +1,31 @@
+format: 1
+id: demo-notes
+title: Draft a note and have it checked
+version: 1
+inputs:
+  type: object
+  properties: { topic: { type: string } }
+  required: [topic]
+defaults:
+  deadline: 20m
+  retry: { max: 1, on: [no_result, lost] }
+start: draft
+stages:
+  draft:
+    type: agent
+    agent: drafter
+    session: run
+    brief: briefs/draft.md
+    outcomes:
+      drafted: { fields: { note: string }, next: check }
+      blocked: { fields: { reason: string }, next: failed }
+  check:
+    type: agent
+    agent: checker
+    session: run
+    brief: briefs/check.md
+    outcomes:
+      pass: { next: done }
+      fail: { fields: { findings: string }, next: failed }
+  done: { type: end, status: completed }
+  failed: { type: end, status: failed }

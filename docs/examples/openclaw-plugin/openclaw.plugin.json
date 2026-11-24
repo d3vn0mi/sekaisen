@@ -1,0 +1,15 @@
+{
+  "id": "demo-pipeline",
+  "name": "Demo pipeline",
+  "description": "Runs a two-stage drafter and checker pipeline with sekaisen.",
+  "contracts": {
+    "tools": ["stage_complete", "stage_progress", "demo_start"]
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

@@ -36,6 +36,7 @@ engine. There is no visual editor, and stages cannot run in parallel yet.
 [Non-goals](#non-goals) ·
 [Design](docs/design.md) ·
 [Adapters](docs/adapter.md) ·
+[OpenClaw](docs/openclaw.md) ·
 [Contributing](#contributing) ·
 [Security](#security)
 
@@ -212,7 +213,7 @@ The road to 0.1:
 - [x] **MCP completion server.** `stage_complete` and `stage_progress` for harnesses that speak MCP and
       have no plugin system.
 - [x] **CLI.** `check`, `render`, `simulate`, `status` and `runs`.
-- [ ] **First adapter.** OpenClaw.
+- [x] **First adapter.** OpenClaw, as a gateway plugin: [`docs/openclaw.md`](docs/openclaw.md).
 - [ ] **Release.** CI on Node 22.13, the current LTS and the latest release, and an npm package
       published from GitHub Actions with provenance.
 

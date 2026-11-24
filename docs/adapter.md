@@ -1,5 +1,7 @@
 # The harness adapter
 
+The first adapter, for the OpenClaw gateway, is described in [`openclaw.md`](openclaw.md).
+
 The engine never runs an agent and never imports a harness. It talks to the system that does, a
 coding agent, an agent gateway, anything that can take a turn and call a tool, through one
 interface, `HarnessAdapter`. This page is the reference for that interface and for the completion
@@ -72,6 +74,8 @@ interface StartTurn {
   tools: string[];         // the completion tools, for harnesses that grant tools per turn
 }
 ```
+
+The OpenClaw adapter ignores `tools`: it does not grant tools per turn. See [the OpenClaw adapter](openclaw.md).
 
 It starts the turn and returns `{ runId }` without waiting for the turn to end. The `message` already
 carries the token (`Your completion token is: …`); the adapter passes it on unread.
@@ -148,8 +152,10 @@ the abort fails, and it retries a failed abort with backoff. An adapter without 
 ### `deliver(sessionKey, message)`
 
 Sends a message into a session without starting a stage run. The engine does not call it yet: a gate
-reminder is a transition in the log and a `gate_reminder` event (the `gate` event fires once, on entry) the host can show however it likes. A host may
-use `deliver` for its own notifications, such as relaying those events into a session.
+reminder is a transition in the log and a `gate_reminder` event the host can show however it likes.
+The `gate` event fires once, on entry; each reminder fires `gate_reminder` in its place. A gate first
+seen already past its timeout is announced by `gate_reminder` alone. A host may use `deliver` for its
+own notifications, such as relaying those events into a session.
 
 ### `schedule(spec, fn)` and `guardToolCall(fn)` (optional)
 

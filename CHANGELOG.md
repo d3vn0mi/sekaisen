@@ -13,6 +13,10 @@ Pre-0.1. Nothing is installable yet.
 
 ### Added
 
+- The OpenClaw adapter, `sekaisen/openclaw`: `OpenClawAdapter`, `createPipelinePlugin` to host the engine in a
+  gateway plugin (completion tools, a service, host tools), and `gateButtons` to post operator gates with answer
+  buttons. Documented in [`docs/openclaw.md`](docs/openclaw.md), with an example plugin in
+  [`docs/examples/openclaw-plugin`](docs/examples/openclaw-plugin).
 - A `gate_reminder` engine event, with the gate's prompt and outcomes and a `reminder` count from 1. An
   operator gate's reminder emits it in place of a repeated `gate` event, which now fires once, on entry.
 - Format 1: pipeline definitions in YAML with `agent`, `gate`, `check`, `action`, `wait` and `end`
