@@ -10,8 +10,6 @@ export interface AdapterOptions {
   api: PluginApi;
   /** The agent ids pipelines may name; scanned on a cold lookup. */
   agents: string[];
-  /** Maps a pipeline role to an agent id. Default: identity. */
-  agentFor?(role: string): string;
   /** Maps an engine session key to an OpenClaw one. */
   sessionKey?(engineKey: string, agent: string): string;
   /** Pins a provider and model, by agent. Opt-in. */

@@ -65,7 +65,7 @@ export interface TaskRunBinding {
 }
 
 export interface OutboundAdapter {
-  sendPayload(p: {
+  sendPayload?(p: {
     cfg: unknown;
     to: string;
     text: string;
@@ -96,7 +96,9 @@ export interface Runtime {
   };
   channel: {
     outbound: {
-      loadAdapter(channel: string): OutboundAdapter | Promise<OutboundAdapter>;
+      loadAdapter(
+        channel: string,
+      ): OutboundAdapter | undefined | Promise<OutboundAdapter | undefined>;
     };
   };
 }

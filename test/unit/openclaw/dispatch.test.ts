@@ -49,7 +49,7 @@ describe("startTurn", () => {
     expect(s.runs).toEqual([]);
   });
 
-  test("a custom sessionKey mapper and agentFor are honoured", async () => {
+  test("a custom sessionKey mapper is honoured", async () => {
     const s = makeStub();
     const a = new OpenClawAdapter({
       api: s.api,
