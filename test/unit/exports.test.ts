@@ -93,6 +93,7 @@ test("the OpenClaw subpath exports the adapter and plugin helpers and stays out 
   expect(Object.keys(sub).sort()).toEqual([
     "OpenClawAdapter",
     "createPipelinePlugin",
+    "defaultSessionKey",
     "gateButtons",
   ]);
   for (const name of Object.keys(sub)) {
