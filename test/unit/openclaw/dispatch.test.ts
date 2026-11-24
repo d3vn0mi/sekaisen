@@ -40,6 +40,14 @@ describe("startTurn", () => {
     expect(s.runs[0]?.sessionKey).toBe("agent:checker:proj-site-a");
   });
 
+  test("startTurn refuses an agent not in agents", async () => {
+    const s = makeStub();
+    const a = new OpenClawAdapter({ api: s.api, agents: ["checker"] });
+    await expect(a.startTurn(turn())).rejects.toThrow(/drafter.*agents/);
+    expect(s.calls).not.toContain("subagent.run");
+    expect(s.runs).toEqual([]);
+  });
+
   test("an unrecognised engine key throws", async () => {
     const s = makeStub();
     const a = new OpenClawAdapter({ api: s.api, agents: ["drafter"] });
@@ -53,7 +61,7 @@ describe("startTurn", () => {
     const s = makeStub();
     const a = new OpenClawAdapter({
       api: s.api,
-      agents: ["x"],
+      agents: ["drafter"],
       sessionKey: (k, agent) => `agent:${agent}:custom-${k.length}`,
     });
     await a.startTurn(turn());

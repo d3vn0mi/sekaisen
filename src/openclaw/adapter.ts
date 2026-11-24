@@ -85,6 +85,11 @@ export class OpenClawAdapter implements HarnessAdapter {
   }
 
   async startTurn(p: StartTurn): Promise<{ runId: string }> {
+    if (!this.o.agents.includes(p.agent)) {
+      throw new Error(
+        `agent "${p.agent}" is not listed in the adapter's agents; list it so its runs can be found again after a restart`,
+      );
+    }
     // `p.tools` is ignored: a per-run grant does not reach claude-cli turns,
     // so completion tools are granted by the agent's own tool config.
     const sessionKey = (this.o.sessionKey ?? defaultSessionKey)(

@@ -185,6 +185,30 @@ describe("readRunOutcome", () => {
   });
 });
 
+test("a finished run read twice reads the same ending", async () => {
+  const { s, a } = setup([row({ runId: "k2", status: "succeeded" })]);
+  s.sessions.set("drafter|agent:drafter:pipe-x", {
+    modelProvider: "claude-cli",
+    model: "claude-sonnet-5-5",
+  });
+  await a.startTurn({
+    agent: "drafter",
+    sessionKey: "run:r_1:drafter",
+    message: "m",
+    capMs: 1,
+    idempotencyKey: "k2",
+    tools: [],
+  });
+  const first = await a.readRunOutcome("k2");
+  const second = await a.readRunOutcome("k2");
+  expect(first).toEqual({
+    state: "ended",
+    ending: "ok",
+    runtime: { provider: "claude-cli", model: "claude-sonnet-5-5" },
+  });
+  expect(second).toEqual(first);
+});
+
 describe("capabilities", () => {
   test("options win, then config, then defaults", async () => {
     const d = setup([]);
