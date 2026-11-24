@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import {
   type CompletionTool,
   stageCompleteTool,
@@ -9,6 +10,7 @@ import {
   Engine,
   type EngineOptions,
 } from "../engine/engine.js";
+import type { Disposable } from "../engine/events.js";
 import { MIN_TOKEN_SECRET_BYTES } from "../engine/tokens.js";
 import type { HostRegistry } from "../host/registry.js";
 import { openSqliteStore } from "../store/sqlite.js";
@@ -17,11 +19,20 @@ import { type AdapterOptions, OpenClawAdapter } from "./adapter.js";
 import type { PluginApi, ToolContext, ToolDefinition } from "./api.js";
 import { type GateButtonOptions, gateButtons } from "./buttons.js";
 
+/** Adapter options for `createPipelinePlugin`; `api` defaults to the plugin's. */
+export type PluginAdapterOptions = Omit<AdapterOptions, "api"> & {
+  api?: PluginApi;
+};
+
 export interface PipelinePluginOptions {
   api: PluginApi;
   /** An adapter to use as is, or the options to build one. */
-  adapter: OpenClawAdapter | AdapterOptions;
-  /** The engine's SQLite store; created and migrated if missing. */
+  adapter: OpenClawAdapter | PluginAdapterOptions;
+  /**
+   * The engine's SQLite store; created and migrated if missing. One engine
+   * runs per store file in a process: a later registration with the same
+   * file reuses it.
+   */
   storePath: string;
   /**
    * At least 32 bytes, from which completion tokens are derived. Required:
@@ -52,8 +63,14 @@ export type HostToolHandler = (
 ) => ToolResult | Promise<ToolResult>;
 
 export interface PipelinePlugin {
-  engine: Engine;
-  adapter: OpenClawAdapter;
+  /**
+   * The engine. Outside a full registration it is the one a full
+   * registration of the same store started in this process; reading it
+   * throws when there is none.
+   */
+  readonly engine: Engine;
+  /** The engine's adapter; resolved and thrown like `engine`. */
+  readonly adapter: OpenClawAdapter;
   /**
    * Registers a host tool whose results have the same shape as the
    * completion tools'. The name must be declared under `contracts.tools` in
@@ -65,6 +82,12 @@ export interface PipelinePlugin {
     inputSchema: object,
     handler: HostToolHandler,
   ): void;
+  /**
+   * Stops the engine, closes its store and forgets it, so a later
+   * registration opens the store again. Does nothing outside a full
+   * registration, or once closed.
+   */
+  close(): Promise<void>;
 }
 
 /** What OpenClaw expects back from a tool: text content, never a throw. */
@@ -121,6 +144,26 @@ function completionTool(
   );
 }
 
+/** One store's engine, shared by every registration of that store. */
+interface Hosted {
+  engine: Engine;
+  adapter: OpenClawAdapter;
+  store: Store;
+  /** The gate buttons installed on the newest registration's api. */
+  buttons?: Disposable;
+  closed?: boolean;
+}
+
+/** The engines this process runs, by resolved store path. */
+const hosted = new Map<string, Hosted>();
+
+/** The cache key for a store path; an in-memory store is never shared. */
+function storeKey(storePath: string): string | undefined {
+  return storePath === ":memory:" || storePath === ""
+    ? undefined
+    : resolve(storePath);
+}
+
 /**
  * Hosts the engine in an OpenClaw gateway plugin: a service that starts and
  * stops it, `stage_complete` and `stage_progress` as plugin tools (the
@@ -131,6 +174,14 @@ function completionTool(
  * each pipeline agent in that agent's `tools.alsoAllow`, and declares them
  * under `contracts.tools` in its manifest. Throws, before registering
  * anything, when `tokenSecret` is missing or shorter than 32 bytes.
+ *
+ * Only a full registration (`api.registrationMode` `"full"` or absent)
+ * opens the store and builds the engine. Any other mode registers the tools
+ * alone, so OpenClaw can list them; their calls reach the engine a full
+ * registration of the same store started in this process, and are error
+ * results when there is none. One engine runs per store file: a later full
+ * registration of the same file reuses it and registers the service, tools
+ * and buttons again on its own `api`.
  */
 export function createPipelinePlugin(o: PipelinePluginOptions): PipelinePlugin {
   if (
@@ -141,26 +192,38 @@ export function createPipelinePlugin(o: PipelinePluginOptions): PipelinePlugin {
       `tokenSecret must be at least ${MIN_TOKEN_SECRET_BYTES} bytes`,
     );
   }
+  const key = storeKey(o.storePath);
+  const mode = o.api.registrationMode;
+  if (mode !== undefined && mode !== "full") return registerTools(o, key);
+
+  const cached = key === undefined ? undefined : hosted.get(key);
+  if (cached) {
+    reregister(o, cached);
+    return registerTools(o, key, cached);
+  }
+
   const adapter =
     o.adapter instanceof OpenClawAdapter
       ? o.adapter
-      : new OpenClawAdapter(o.adapter);
+      : new OpenClawAdapter({ ...o.adapter, api: o.adapter.api ?? o.api });
   const store = openSqliteStore(o.storePath);
   try {
-    return host(o, adapter, store);
+    const entry = host(o, adapter, store);
+    const plugin = registerTools(o, key, entry);
+    if (key !== undefined) hosted.set(key, entry);
+    return plugin;
   } catch (err) {
     store.close();
     throw err;
   }
 }
 
-/** Builds the engine on `store` and registers everything with OpenClaw. */
+/** Builds the engine on `store` and registers its service and buttons. */
 function host(
   o: PipelinePluginOptions,
   adapter: OpenClawAdapter,
   store: Store,
-): PipelinePlugin {
-  const { api } = o;
+): Hosted {
   const engine = new Engine({
     ...o.engine,
     store,
@@ -169,9 +232,22 @@ function host(
     definitions: o.definitions,
     tokenSecret: o.tokenSecret,
   });
+  const entry: Hosted = { engine, adapter, store };
+  reregister(o, entry);
+  return entry;
+}
 
+/** Registers the service and, with `buttons`, the gate buttons on `o.api`. */
+function reregister(o: PipelinePluginOptions, entry: Hosted): void {
+  const { api } = o;
+  const { engine, store } = entry;
   // Listeners first: the start-up reconcile can already emit a reminder.
-  if (o.buttons) gateButtons(o.buttons).install({ api, engine, store });
+  // A re-registration moves the buttons to the new api, so a gate is
+  // posted once.
+  if (o.buttons) {
+    entry.buttons?.dispose();
+    entry.buttons = gateButtons(o.buttons).install({ api, engine, store });
+  }
 
   // Stop leaves the store open: OpenClaw may start the service again
   // without building the plugin anew.
@@ -180,14 +256,46 @@ function host(
     start: () => engine.start(),
     stop: () => engine.stop(),
   });
+}
+
+/**
+ * Registers the completion tools and returns the plugin. With no `entry`
+ * (a registration outside full mode) every engine use is resolved at call
+ * time from the process's engines.
+ */
+function registerTools(
+  o: PipelinePluginOptions,
+  key: string | undefined,
+  entry?: Hosted,
+): PipelinePlugin {
+  const { api } = o;
+  const current = (): Hosted => {
+    const found = entry ?? (key === undefined ? undefined : hosted.get(key));
+    if (!found) {
+      throw new Error(
+        `no pipeline engine is running in this process for store ${o.storePath}`,
+      );
+    }
+    return found;
+  };
+  const engine = {
+    complete: (...a: Parameters<Engine["complete"]>) =>
+      current().engine.complete(...a),
+    progress: (...a: Parameters<Engine["progress"]>) =>
+      current().engine.progress(...a),
+  };
 
   for (const tool of [stageCompleteTool(engine), stageProgressTool(engine)]) {
     api.registerTool((ctx) => completionTool(tool, ctx), { name: tool.name });
   }
 
   return {
-    engine,
-    adapter,
+    get engine() {
+      return current().engine;
+    },
+    get adapter() {
+      return current().adapter;
+    },
     tool(name, description, inputSchema, handler) {
       api.registerTool(
         (ctx) =>
@@ -196,6 +304,17 @@ function host(
           ),
         { name },
       );
+    },
+    async close() {
+      if (!entry || entry.closed) return;
+      entry.closed = true;
+      if (key !== undefined && hosted.get(key) === entry) hosted.delete(key);
+      entry.buttons?.dispose();
+      try {
+        await entry.engine.stop();
+      } finally {
+        entry.store.close();
+      }
     },
   };
 }

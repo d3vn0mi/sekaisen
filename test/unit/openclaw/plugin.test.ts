@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { VirtualClock } from "../../../src/engine/clock.js";
 import { createRegistry } from "../../../src/host/registry.js";
 import type {
+  PluginApi,
   ToolContext,
   ToolDefinition,
   ToolFactory,
@@ -16,7 +17,12 @@ import {
   type PipelinePluginOptions,
 } from "../../../src/openclaw/index.js";
 import type { Store } from "../../../src/store/types.js";
-import { reviewLoop, SwapSource, tokenOf } from "../engine/engine-helpers.js";
+import {
+  inline,
+  reviewLoop,
+  SwapSource,
+  tokenOf,
+} from "../engine/engine-helpers.js";
 import { makeStub, type Stub } from "./stub.js";
 
 // Every store the plugin opens, so a test can see whether it was closed.
@@ -48,7 +54,7 @@ const SECRET = new Uint8Array(32).fill(7);
 const plugins: PipelinePlugin[] = [];
 const dirs: string[] = [];
 afterEach(async () => {
-  for (const p of plugins.splice(0)) await p.engine.stop();
+  for (const p of plugins.splice(0)) await p.close();
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
@@ -368,5 +374,222 @@ describe("createPipelinePlugin", () => {
     expect(
       withButtons.stub.handlers.map((h) => [h.channel, h.namespace]),
     ).toEqual([["telegram", "sekaisen"]]);
+  });
+});
+
+describe("registration modes and one engine per store", () => {
+  function tempStore(): string {
+    const dir = mkdtempSync(join(tmpdir(), "sekaisen-plugin-"));
+    dirs.push(dir);
+    return join(dir, "store.db");
+  }
+
+  async function register(
+    stub: Stub,
+    over: Partial<PipelinePluginOptions> = {},
+  ): Promise<PipelinePlugin> {
+    const plugin = createPipelinePlugin({
+      api: stub.api,
+      adapter: { agents: ["drafter", "checker"] },
+      storePath: ":memory:",
+      tokenSecret: SECRET,
+      definitions: new SwapSource(await reviewLoop()),
+      registry: createRegistry(),
+      engine: { clock: new VirtualClock(1_000_000) },
+      ...over,
+    });
+    plugins.push(plugin);
+    return plugin;
+  }
+
+  test("outside full registration nothing stateful happens, and the runtime is not touched", async () => {
+    for (const mode of [
+      "discovery",
+      "tool-discovery",
+      "setup-only",
+      "setup-runtime",
+      "cli-metadata",
+    ]) {
+      const stub = makeStub();
+      stub.api.registrationMode = mode;
+      stub.api.runtime = new Proxy({} as PluginApi["runtime"], {
+        get() {
+          throw new Error(`runtime unavailable during ${mode}`);
+        },
+      });
+      const before = opened.length;
+      const plugin = await register(stub, {
+        storePath: tempStore(),
+        buttons: { channel: "telegram", to: "telegram:1", operatorIds: [] },
+      });
+      expect(opened.length).toBe(before);
+      expect(stub.services).toEqual([]);
+      expect(stub.handlers).toEqual([]);
+      // The tool names are still there for OpenClaw to discover.
+      expect(stub.tools.map((t) => t.opts?.name).sort()).toEqual([
+        "stage_complete",
+        "stage_progress",
+      ]);
+      // With no engine running in the process, a call is an error result.
+      const result = await toolFor(stub, "stage_complete").execute("c-1", {
+        token: "t",
+        outcome: "drafted",
+      });
+      expect(result).toMatchObject({
+        content: [
+          { type: "text", text: expect.stringContaining("no pipeline engine") },
+        ],
+        details: { isError: true },
+      });
+      expect(() => plugin.engine).toThrow(/no pipeline engine/);
+    }
+  });
+
+  test("a host tool outside full registration reaches the engine lazily", async () => {
+    const storePath = tempStore();
+    const discovery = makeStub();
+    discovery.api.registrationMode = "tool-discovery";
+    const lazy = await register(discovery, { storePath });
+    lazy.tool("demo_runs", "Counts runs.", { type: "object" }, async () => {
+      const { runId } = await lazy.engine.startRun("review-loop", {
+        topic: "rust",
+      });
+      return { text: runId, isError: false };
+    });
+    const tool = toolFor(discovery, "demo_runs");
+    expect(await tool.execute("c-1", {})).toMatchObject({
+      content: [
+        { type: "text", text: expect.stringContaining("no pipeline engine") },
+      ],
+      details: { isError: true },
+    });
+
+    const full = makeStub();
+    full.api.registrationMode = "full";
+    const plugin = await register(full, { storePath });
+    expect(lazy.engine).toBe(plugin.engine);
+    expect(lazy.adapter).toBe(plugin.adapter);
+    expect(await tool.execute("c-2", {})).toMatchObject({
+      details: { isError: false },
+    });
+  });
+
+  test("two registrations with one store share one engine", async () => {
+    const storePath = tempStore();
+    const first = makeStub();
+    const before = opened.length;
+    const a = await register(first, { storePath });
+    const second = makeStub();
+    second.api.registrationMode = "full";
+    const b = await register(second, { storePath });
+    expect(opened.length).toBe(before + 1);
+    expect(b.engine).toBe(a.engine);
+    expect(b.adapter).toBe(a.adapter);
+    // Each registry gets its own service and tools.
+    expect(second.services.map((s) => s.id)).toEqual(["sekaisen"]);
+
+    // A tool built from either registration completes the same engine's turn.
+    await a.engine.startRun("review-loop", { topic: "rust" });
+    await a.engine.tick();
+    const run = first.runs.at(-1);
+    if (!run) throw new Error("no turn dispatched");
+    const result = await toolFor(second, "stage_complete").execute("c-1", {
+      token: tokenOf(run.message),
+      outcome: "drafted",
+      fields: { pr_url: "https://demo.example/pr/1" },
+    });
+    expect(result).toMatchObject({ details: { isError: false } });
+
+    // So does a tool-discovery registration in the same process.
+    const discovery = makeStub();
+    discovery.api.registrationMode = "tool-discovery";
+    await register(discovery, { storePath });
+    expect(opened.length).toBe(before + 1);
+    const progress = vi.spyOn(a.engine, "progress");
+    await toolFor(discovery, "stage_progress").execute("c-2", {
+      token: "t",
+      note: "n",
+    });
+    expect(progress).toHaveBeenCalledTimes(1);
+  });
+
+  test("a re-registration with buttons posts each gate once, on the new api", async () => {
+    const storePath = tempStore();
+    const buttons = {
+      channel: "telegram",
+      to: "telegram:1",
+      operatorIds: ["1"],
+    };
+    const definitions = new SwapSource(
+      inline({
+        id: "held",
+        start: "publish",
+        stages: {
+          publish: {
+            type: "gate",
+            who: "operator",
+            prompt: "Publish?",
+            timeout: 3_600_000,
+            onTimeout: { remind: 600_000 },
+            outcomes: { approve: { next: "done" } },
+          },
+          done: { type: "end", status: "completed" },
+        },
+      }),
+    );
+    const first = makeStub();
+    const a = await register(first, { storePath, buttons, definitions });
+    const second = makeStub();
+    await register(second, { storePath, buttons, definitions });
+    expect(second.handlers.map((h) => h.namespace)).toEqual(["sekaisen"]);
+    await a.engine.startRun("held", {});
+    await a.engine.tick();
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    expect(first.sent).toHaveLength(0);
+    expect(second.sent).toHaveLength(1);
+  });
+
+  test("a failed re-registration leaves the shared store open", async () => {
+    const storePath = tempStore();
+    const a = await register(makeStub(), { storePath });
+    const broken = makeStub();
+    broken.api.registerService = () => {
+      throw new Error("registration refused");
+    };
+    await expect(register(broken, { storePath })).rejects.toThrow(
+      "registration refused",
+    );
+    expect(isOpen(opened.at(-1))).toBe(true);
+    expect(a.engine.status).toBeTypeOf("function");
+  });
+
+  test("close stops the engine, closes the store and forgets it", async () => {
+    const storePath = tempStore();
+    const a = await register(makeStub(), { storePath });
+    const stop = vi.spyOn(a.engine, "stop");
+    const store = opened.at(-1);
+    await a.close();
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(isOpen(store)).toBe(false);
+    // Closing twice is harmless.
+    await a.close();
+    const before = opened.length;
+    const b = await register(makeStub(), { storePath });
+    expect(opened.length).toBe(before + 1);
+    expect(b.engine).not.toBe(a.engine);
+  });
+
+  test("an in-memory store is never shared", async () => {
+    const a = await register(makeStub());
+    const b = await register(makeStub());
+    expect(b.engine).not.toBe(a.engine);
+  });
+
+  test("adapter options may leave out api", async () => {
+    const stub = makeStub();
+    const plugin = await register(stub);
+    await plugin.engine.startRun("review-loop", { topic: "rust" });
+    await plugin.engine.tick();
+    expect(stub.runs).toHaveLength(1);
   });
 });

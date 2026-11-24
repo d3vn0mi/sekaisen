@@ -33,7 +33,7 @@ interface Rig {
 
 const plugins: PipelinePlugin[] = [];
 afterEach(async () => {
-  for (const p of plugins.splice(0)) await p.engine.stop();
+  for (const p of plugins.splice(0)) await p.close();
 });
 
 /** A plugin whose `held` pipeline is one operator gate between start and an end. */

@@ -174,6 +174,13 @@ export interface InteractiveHandlerDefinition {
 
 export interface PluginApi {
   id: string;
+  /**
+   * Why OpenClaw is loading the plugin: `"full"` for the gateway's own
+   * registration, or a narrower load (`"discovery"`, `"tool-discovery"`,
+   * `"setup-only"`, `"setup-runtime"`, `"cli-metadata"`) that only reads
+   * what the plugin registers. Absent in older hosts, which mean full.
+   */
+  registrationMode?: string;
   pluginConfig?: unknown;
   runtime: Runtime;
   logger: Logger;
