@@ -12,6 +12,7 @@ import {
 import { MIN_TOKEN_SECRET_BYTES } from "../engine/tokens.js";
 import type { HostRegistry } from "../host/registry.js";
 import { openSqliteStore } from "../store/sqlite.js";
+import type { Store } from "../store/types.js";
 import { type AdapterOptions, OpenClawAdapter } from "./adapter.js";
 import type { PluginApi, ToolContext, ToolDefinition } from "./api.js";
 import { type GateButtonOptions, gateButtons } from "./buttons.js";
@@ -104,13 +105,19 @@ function hostTool(
   };
 }
 
+/**
+ * A completion tool for one turn. Without a calling agent the core could
+ * not check that the stage is the caller's, so the call is refused here.
+ */
 function completionTool(
   tool: CompletionTool,
   ctx: ToolContext,
 ): ToolDefinition {
-  const caller = ctx.agentId === undefined ? {} : { agent: ctx.agentId };
+  const agent = ctx.agentId;
   return hostTool(tool.name, tool.description, tool.inputSchema, (params) =>
-    tool.handler(params, caller),
+    typeof agent === "string" && agent !== ""
+      ? tool.handler(params, { agent })
+      : { text: `${tool.name} needs a calling agent`, isError: true },
   );
 }
 
@@ -134,37 +141,44 @@ export function createPipelinePlugin(o: PipelinePluginOptions): PipelinePlugin {
       `tokenSecret must be at least ${MIN_TOKEN_SECRET_BYTES} bytes`,
     );
   }
-  const { api } = o;
   const adapter =
     o.adapter instanceof OpenClawAdapter
       ? o.adapter
       : new OpenClawAdapter(o.adapter);
   const store = openSqliteStore(o.storePath);
-  let engine: Engine;
   try {
-    engine = new Engine({
-      ...o.engine,
-      store,
-      adapter,
-      registry: o.registry,
-      definitions: o.definitions,
-      tokenSecret: o.tokenSecret,
-    });
+    return host(o, adapter, store);
   } catch (err) {
     store.close();
     throw err;
   }
+}
+
+/** Builds the engine on `store` and registers everything with OpenClaw. */
+function host(
+  o: PipelinePluginOptions,
+  adapter: OpenClawAdapter,
+  store: Store,
+): PipelinePlugin {
+  const { api } = o;
+  const engine = new Engine({
+    ...o.engine,
+    store,
+    adapter,
+    registry: o.registry,
+    definitions: o.definitions,
+    tokenSecret: o.tokenSecret,
+  });
 
   // Listeners first: the start-up reconcile can already emit a reminder.
   if (o.buttons) gateButtons(o.buttons).install({ api, engine, store });
 
+  // Stop leaves the store open: OpenClaw may start the service again
+  // without building the plugin anew.
   api.registerService({
     id: o.serviceId ?? "sekaisen",
     start: () => engine.start(),
-    async stop() {
-      await engine.stop();
-      store.close();
-    },
+    stop: () => engine.stop(),
   });
 
   for (const tool of [stageCompleteTool(engine), stageProgressTool(engine)]) {

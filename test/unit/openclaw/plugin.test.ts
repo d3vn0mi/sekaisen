@@ -4,15 +4,44 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { VirtualClock } from "../../../src/engine/clock.js";
 import { createRegistry } from "../../../src/host/registry.js";
-import type { ToolDefinition, ToolFactory } from "../../../src/openclaw/api.js";
+import type {
+  ToolContext,
+  ToolDefinition,
+  ToolFactory,
+} from "../../../src/openclaw/api.js";
 import {
   createPipelinePlugin,
   OpenClawAdapter,
   type PipelinePlugin,
   type PipelinePluginOptions,
 } from "../../../src/openclaw/index.js";
+import type { Store } from "../../../src/store/types.js";
 import { reviewLoop, SwapSource, tokenOf } from "../engine/engine-helpers.js";
 import { makeStub, type Stub } from "./stub.js";
+
+// Every store the plugin opens, so a test can see whether it was closed.
+const opened = vi.hoisted((): Store[] => []);
+vi.mock("../../../src/store/sqlite.js", async (importOriginal) => {
+  const real =
+    await importOriginal<typeof import("../../../src/store/sqlite.js")>();
+  return {
+    ...real,
+    openSqliteStore: (...args: Parameters<typeof real.openSqliteStore>) => {
+      const store = real.openSqliteStore(...args);
+      opened.push(store);
+      return store;
+    },
+  };
+});
+
+const isOpen = (store: Store | undefined): boolean => {
+  try {
+    store?.tx((t) => t.getGate("s_NONE"));
+    return store !== undefined;
+  } catch {
+    return false;
+  }
+};
 
 const SECRET = new Uint8Array(32).fill(7);
 
@@ -41,20 +70,30 @@ async function setup(
   return { stub, plugin };
 }
 
-/** The tool named `name`, as OpenClaw would build it for a turn of `agentId`. */
+/**
+ * The tool named `name`, as OpenClaw would build it for a turn of
+ * `agentId`; null builds it for a turn with no agent id.
+ */
 function toolFor(
   stub: Stub,
   name: string,
-  agentId = "drafter",
+  agentId: string | null = "drafter",
 ): ToolDefinition {
+  const ctx: ToolContext =
+    agentId === null
+      ? { sessionKey: "agent:x:main" }
+      : { agentId, sessionKey: "agent:x:main" };
   for (const { tool } of stub.tools) {
     const built =
-      typeof tool === "function"
-        ? (tool as ToolFactory)({ agentId, sessionKey: "agent:x:main" })
-        : tool;
+      typeof tool === "function" ? (tool as ToolFactory)(ctx) : tool;
     for (const t of [built ?? []].flat()) if (t.name === name) return t;
   }
   throw new Error(`no tool ${name} registered`);
+}
+
+/** The draft stage's state in the only run. */
+function draftState(plugin: PipelinePlugin, runId: string): string | undefined {
+  return plugin.engine.status(runId).live?.state;
 }
 
 describe("createPipelinePlugin", () => {
@@ -74,6 +113,41 @@ describe("createPipelinePlugin", () => {
     expect(stop).not.toHaveBeenCalled();
     await service.stop();
     expect(stop).toHaveBeenCalledTimes(1);
+    // Stopping leaves the store open: OpenClaw may start the service again.
+    expect(isOpen(opened.at(-1))).toBe(true);
+  });
+
+  test("service stop then start runs the engine again", async () => {
+    const { stub, plugin } = await setup({ engine: { tickMs: 5 } });
+    const service = stub.services[0];
+    if (!service?.stop) throw new Error("no stop");
+    await service.start();
+    await service.stop();
+    await service.start();
+    await plugin.engine.startRun("review-loop", { topic: "rust" });
+    // Dispatched by the engine's own tick, not by the test.
+    await vi.waitFor(() => expect(stub.runs).toHaveLength(1));
+    await service.stop();
+  });
+
+  test("a registration that throws closes the store it opened", async () => {
+    const stub = makeStub();
+    stub.api.registerService = () => {
+      throw new Error("registration refused");
+    };
+    const before = opened.length;
+    expect(() =>
+      createPipelinePlugin({
+        api: stub.api,
+        adapter: { api: stub.api, agents: ["drafter"] },
+        storePath: ":memory:",
+        tokenSecret: SECRET,
+        definitions: new SwapSource(),
+        registry: createRegistry(),
+      }),
+    ).toThrow("registration refused");
+    expect(opened.length).toBe(before + 1);
+    expect(isOpen(opened.at(-1))).toBe(false);
   });
 
   test("the service id can be set", async () => {
@@ -133,6 +207,64 @@ describe("createPipelinePlugin", () => {
       expect.objectContaining({ callerAgent: "drafter" }),
     );
     expect(result).toMatchObject({ details: { isError: false } });
+  });
+
+  test("a tool context with no agentId cannot complete a live stage", async () => {
+    const { stub, plugin } = await setup();
+    const { runId } = await plugin.engine.startRun("review-loop", {
+      topic: "rust",
+    });
+    await plugin.engine.tick();
+    const run = stub.runs.at(-1);
+    if (!run) throw new Error("no turn dispatched");
+    const complete = vi.spyOn(plugin.engine, "complete");
+    const progress = vi.spyOn(plugin.engine, "progress");
+    const token = tokenOf(run.message);
+    for (const name of ["stage_complete", "stage_progress"]) {
+      const result = await toolFor(stub, name, null).execute("call-1", {
+        token,
+        outcome: "drafted",
+        fields: { pr_url: "u" },
+        note: "n",
+      });
+      expect(result).toEqual({
+        content: [{ type: "text", text: `${name} needs a calling agent` }],
+        details: { isError: true },
+      });
+      const empty = await toolFor(stub, name, "").execute("call-2", {
+        token,
+        outcome: "drafted",
+        fields: { pr_url: "u" },
+        note: "n",
+      });
+      expect(empty).toMatchObject({ details: { isError: true } });
+    }
+    expect(complete).not.toHaveBeenCalled();
+    expect(progress).not.toHaveBeenCalled();
+    expect(draftState(plugin, runId)).toBe("working");
+  });
+
+  test("an agent other than the stage's is refused", async () => {
+    const { stub, plugin } = await setup();
+    const { runId } = await plugin.engine.startRun("review-loop", {
+      topic: "rust",
+    });
+    await plugin.engine.tick();
+    const run = stub.runs.at(-1);
+    if (!run) throw new Error("no turn dispatched");
+    const result = await toolFor(stub, "stage_complete", "checker").execute(
+      "call-1",
+      {
+        token: tokenOf(run.message),
+        outcome: "drafted",
+        fields: { pr_url: "u" },
+      },
+    );
+    expect(result).toMatchObject({
+      content: [{ type: "text", text: expect.stringContaining("drafter") }],
+      details: { isError: true },
+    });
+    expect(draftState(plugin, runId)).toBe("working");
   });
 
   test("a wrong outcome is a tool error result, not a throw", async () => {
