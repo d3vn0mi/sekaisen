@@ -7,7 +7,7 @@ checks it. The `demo_start` tool starts a run. The page for the adapter is
 | File | What it is |
 |---|---|
 | `openclaw.plugin.json` | The manifest. `contracts.tools` lists every tool the plugin registers |
-| `package.json` | Depends on `sekaisen`. Run `npm install` here, then build or point OpenClaw at `index.ts` as your host expects |
+| `package.json` | Depends on `sekaisen`, with OpenClaw as an optional peer the gateway provides. Run `npm install` here, then build or point OpenClaw at `index.ts` as your host expects |
 | `index.ts` | Loads the pipeline, calls `createPipelinePlugin`, registers `demo_start` |
 | `pipeline.yaml`, `briefs/` | The pipeline |
 
@@ -28,8 +28,10 @@ from `sekaisen` and `sekaisen/openclaw`.
    `stage_progress`. `alsoAllow` replaces what the agent inherited, so re-list everything that agent
    already had. Give `demo_start` to whichever agent will start runs.
 5. **Restart the gateway.**
-6. **Try it.** Have an agent call `demo_start` with a topic, then read progress with
-   `sekaisen runs --store <file>` and `sekaisen status <run_id> --store <file>`, with the store file `demo-pipeline.sqlite` next to `index.ts`.
+6. **Try it.** Have an agent call `demo_start` with a topic. The store file is
+   `demo-pipeline.sqlite`, next to `index.ts`. Pass it as `--store` to read progress:
+   `sekaisen runs --store demo-pipeline.sqlite` lists the runs, and
+   `sekaisen status <run_id> --store demo-pipeline.sqlite` shows one.
 
 ## Author
 

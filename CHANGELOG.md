@@ -17,6 +17,21 @@ Pre-0.1. Nothing is installable yet.
   gateway plugin (completion tools, a service, host tools), and `gateButtons` to post operator gates with answer
   buttons. Documented in [`docs/openclaw.md`](docs/openclaw.md), with an example plugin in
   [`docs/examples/openclaw-plugin`](docs/examples/openclaw-plugin).
+  - A turn cut by a gateway restart reads `unknown`, as a lost turn the engine retries, unless the
+    adapter cancelled it, which still reads `killed`.
+  - The owner session for reads and cancels follows the config's `session.mainKey`, as OpenClaw builds
+    it; `ownerKey(agent)` overrides it.
+  - `createPipelinePlugin` opens its store and builds its engine only in a full registration. Other
+    registration modes register the tools alone, and their calls reach the engine a full registration
+    started. One engine runs per store file in a process, and `plugin.close()` stops it and closes the
+    store. The adapter options may leave out `api`.
+  - A model-pin refusal at the end of a run is reported like one at its start, naming both settings.
+    A run the adapter started that has no task row yet is checked with `waitForRun`.
+  - A successful run's summary is no longer reported as its error.
+  - In the default session key, a project name keeps only `[a-z0-9_-]`; other characters become `-`.
+  - A gate answered by button records `resolved_by` as `<channel>:<senderId>`, the operator who pressed.
+  - `defaultSessionKey` and the types `Logger`, `ServiceDefinition` and `InteractiveHandlerDefinition`
+    are exported from `sekaisen/openclaw`.
 - A `gate_reminder` engine event, with the gate's prompt and outcomes and a `reminder` count from 1. An
   operator gate's reminder emits it in place of a repeated `gate` event, which now fires once, on entry.
 - Format 1: pipeline definitions in YAML with `agent`, `gate`, `check`, `action`, `wait` and `end`
