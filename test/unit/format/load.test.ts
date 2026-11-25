@@ -633,3 +633,9 @@ test("the sync loader returns what the async one does, briefs and hash included"
   expect(sync).toEqual(await loadDefinition(file));
   expect(Object.keys(sync.briefs).length).toBeGreaterThan(0);
 });
+
+test("the sync loader throws for a pipeline file that cannot be read", () => {
+  expect(() =>
+    loadDefinitionSync(path.join(FIXTURE, "no-such-pipeline.yaml")),
+  ).toThrow();
+});

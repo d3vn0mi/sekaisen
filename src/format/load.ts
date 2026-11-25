@@ -415,6 +415,7 @@ function buildDefinition(
  * Reads and normalises a pipeline file. Problems found while reading are
  * returned, not thrown, so a caller can report all of them at once; a file
  * that cannot be parsed or fails the schema yields an empty definition.
+ * {@link loadDefinitionSync} is the same without the promise.
  */
 export async function loadDefinition(file: string): Promise<LoadedDefinition> {
   return loadDefinitionSync(file);
@@ -423,6 +424,8 @@ export async function loadDefinition(file: string): Promise<LoadedDefinition> {
 /**
  * {@link loadDefinition} without the promise, for code that cannot wait: an
  * OpenClaw plugin's module and its `register` must both run synchronously.
+ * Throws when the pipeline file itself cannot be read; every other problem is
+ * returned in `problems`, as with the async form.
  */
 export function loadDefinitionSync(file: string): LoadedDefinition {
   const abs = path.resolve(file);

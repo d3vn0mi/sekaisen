@@ -22,4 +22,5 @@ test("the OpenClaw example's module does not await at its top level", () => {
     .filter((l) => /^\S/.test(l) && !l.startsWith("//"));
   expect(topLevel.filter((l) => /\bawait\b/.test(l))).toEqual([]);
   expect(src).toContain("loadDefinitionSync(");
+  expect(src).not.toMatch(/async\s+register\s*\(/);
 });
