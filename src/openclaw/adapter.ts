@@ -167,8 +167,10 @@ export class OpenClawAdapter implements HarnessAdapter {
       );
       error = texts.find((t) => refusalLine(t) !== undefined) ?? texts[0];
       // A turn cut by a gateway restart was lost, not failed: the engine
-      // retries a lost turn. One this adapter cancelled stays killed.
-      if (!wasAborted && isRestartAbort(waited, texts)) {
+      // retries a lost turn. One this adapter cancelled stays killed. Only
+      // the gateway's own error fields count: the terminal summary can carry
+      // the agent's words, which must not be able to buy a retry.
+      if (!wasAborted && isRestartAbort(waited, [waited?.error, row.error])) {
         this.owners.delete(runId);
         return { state: "unknown" };
       }

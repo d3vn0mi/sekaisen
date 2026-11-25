@@ -154,6 +154,19 @@ describe("readRunOutcome", () => {
     expect(await a.readRunOutcome("run-1")).toEqual({ state: "unknown" });
   });
 
+  test("a terminal summary that reads like the drain error is not a restart", async () => {
+    const { a } = setup([
+      row({
+        status: "failed",
+        terminalSummary: "gateway is draining for restart",
+      }),
+    ]);
+    expect(await a.readRunOutcome("run-1")).toMatchObject({
+      state: "ended",
+      ending: "error",
+    });
+  });
+
   test("a drain error the adapter caused by cancelling still reads killed", async () => {
     const { a } = setup([
       row({ status: "failed", error: "gateway is draining for restart" }),
