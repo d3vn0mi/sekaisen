@@ -33,7 +33,12 @@ import {
   RECONCILE_ACTOR,
   type RunCtx,
 } from "./advance.js";
-import { outcomesList, renderBrief, renderContinuation } from "./brief.js";
+import {
+  outcomesList,
+  renderBrief,
+  renderContinuation,
+  withRetryNote,
+} from "./brief.js";
 import { eachLimit, realTimers, type Timers, withTimeout } from "./calls.js";
 import { cancelRun } from "./cancel.js";
 import { type Clock, systemClock } from "./clock.js";
@@ -1093,14 +1098,20 @@ export class Engine {
     // Store reads happen out here: a store error propagates and the row is
     // tried again on the next tick. Only a brief that can never be rendered
     // refuses the stage run.
+    // A retried attempt's first turn opens with a note, a pure function of
+    // the stored previous attempt, so a resent message is the same one.
     const message =
       row.turnsUsed === 0
-        ? this.briefFor(
-            run,
-            pinned,
-            stage,
-            token,
-            stageFields(t, run.runId, pinned.def),
+        ? this.firstTurn(
+            t,
+            row,
+            this.briefFor(
+              run,
+              pinned,
+              stage,
+              token,
+              stageFields(t, run.runId, pinned.def),
+            ),
           )
         : { text: renderContinuation(row.progressNote, token, stage.outcomes) };
     if ("refused" in message) {
@@ -1255,6 +1266,24 @@ export class Engine {
       logAbort(t, row, "abort_requested", ENGINE_ACTOR, now, { adapterRunId });
     }
     return completed ? undefined : { stageRunId: row.stageRunId, adapterRunId };
+  }
+
+  /** `brief` with the retry note above it when `row` is a retry. */
+  private firstTurn(
+    t: StoreTx,
+    row: StageRunRow,
+    brief: { text: string } | { refused: string },
+  ): { text: string } | { refused: string } {
+    if ("refused" in brief || row.retryIndex === 0) return brief;
+    const previous = t
+      .listStageRuns({ runId: row.runId, limit: 1000 })
+      .find(
+        (s) =>
+          s.stage === row.stage &&
+          s.visit === row.visit &&
+          s.retryIndex === row.retryIndex - 1,
+      );
+    return { text: withRetryNote(brief.text, previous?.ending) };
   }
 
   /** The first turn's brief, or why it can never be rendered. */

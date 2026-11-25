@@ -108,6 +108,11 @@ type RunOutcome =
 - `unknown`: the harness no longer knows this run id. After a restart the engine ends such an attempt
   as `lost` and applies the stage's retry policy.
 
+  A retried attempt is sent the stage's brief again, usually into the same session, which may still hold
+  the earlier attempt cut off. So the first turn of a retry opens with a note saying that an earlier
+  attempt was interrupted and why (see "The footer" in [`format.md`](format.md)); continuation turns and
+  first attempts are unchanged.
+
 **Usage limits.** When a provider refuses a turn because a usage limit was hit, report
 `ending: "error"` (or `"timeout"` or `"killed"`) with the refusal text in `error`. A refusal on an
 `ok` ending is never recognised. The engine looks for a line of the form

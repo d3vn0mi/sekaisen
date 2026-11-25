@@ -13,6 +13,9 @@ Pre-0.1. Nothing is installable yet.
 
 ### Added
 
+- The first turn of a retried attempt opens with a note that an earlier attempt was interrupted, and
+  why when the engine knows (the system restarted, a deadline, a turn that ended without a result), so
+  an agent that sees its cut-off predecessor in a kept session does the task again instead of giving up.
 - The OpenClaw adapter, `sekaisen/openclaw`: `OpenClawAdapter`, `createPipelinePlugin` to host the engine in a
   gateway plugin (completion tools, a service, host tools), and `gateButtons` to post operator gates with answer
   buttons. Documented in [`docs/openclaw.md`](docs/openclaw.md), with an example plugin in

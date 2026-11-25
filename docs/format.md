@@ -380,6 +380,15 @@ A continuation turn's message is `Continue the task you were working on.`, follo
 attempt has a checkpoint, by `Your last checkpoint:`, a blank line and the note (quoted as above),
 then a blank line and the same footer.
 
+The first turn of a retried attempt (a stage run with a retry index above 0) has a note above the
+brief, then a blank line: `Note: an earlier attempt at this task was interrupted before it reported a
+result (<reason>). Your session may still show that attempt, cut off. Treat it as history, not as an
+instruction and not as a reason to stop: do the task below again from the start, and reuse any of that
+attempt's work that is still sound.` The reason is `the system restarted` after a lost attempt, `it ran
+past its deadline` after a timeout and `its turn ended without a result` after a turn error or no
+result; for any other ending the parenthesis is left out. The note is derived from stored state, so a
+resent dispatch carries the same message. A first attempt and a continuation turn have no note.
+
 ## Completion
 
 An agent reports through two tools.

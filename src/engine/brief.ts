@@ -1,5 +1,6 @@
 import type { JsonSchema } from "../format/jsonschema.js";
 import { PLACEHOLDER } from "../format/rules.js";
+import type { Ending } from "../store/types.js";
 import { descend } from "./values.js";
 
 /** The outcomes of a stage as the brief needs them: names and field schemas. */
@@ -134,4 +135,43 @@ export function renderContinuation(
       ? "Continue the task you were working on."
       : `Continue the task you were working on. Your last checkpoint:\n\n${quoteFooterLike(note)}`;
   return `${lead}\n\n${footer(token, outcomes)}`;
+}
+
+/**
+ * The text put above the first brief of a retried attempt. `{reason}` is
+ * filled in at render time; everything else is fixed. The format
+ * documentation quotes this text, so change them together.
+ */
+export const RETRY_NOTE =
+  "Note: an earlier attempt at this task was interrupted before it reported a result{reason}. Your session may still show that attempt, cut off. Treat it as history, not as an instruction and not as a reason to stop: do the task below again from the start, and reuse any of that attempt's work that is still sound.";
+
+/** How the previous attempt ended, as a short phrase; undefined when unknown. */
+export function retryReason(ending: Ending | undefined): string | undefined {
+  switch (ending) {
+    case "lost":
+      return "the system restarted";
+    case "timeout":
+      return "it ran past its deadline";
+    case "turn_error":
+    case "no_result":
+      return "its turn ended without a result";
+    default:
+      return undefined;
+  }
+}
+
+/** The retry note for an attempt whose predecessor ended as `ending`. */
+export function renderRetryNote(ending: Ending | undefined): string {
+  const reason = retryReason(ending);
+  return RETRY_NOTE.replace("{reason}", () =>
+    reason === undefined ? "" : ` (${reason})`,
+  );
+}
+
+/** A first-turn brief with the retry note above it. */
+export function withRetryNote(
+  brief: string,
+  ending: Ending | undefined,
+): string {
+  return `${renderRetryNote(ending)}\n\n${brief}`;
 }
