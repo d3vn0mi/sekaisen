@@ -2,14 +2,15 @@
 // from "sekaisen" and "sekaisen/openclaw" instead of the relative paths.
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { createRegistry, loadDefinition } from "../../../src/index.js";
+import { createRegistry, loadDefinitionSync } from "../../../src/index.js";
 import {
   createPipelinePlugin,
   type PluginApi,
 } from "../../../src/openclaw/index.js";
 
 const dir = import.meta.dirname;
-const pipeline = await loadDefinition(path.join(dir, "pipeline.yaml"));
+// OpenClaw loads this module synchronously: no top-level await here.
+const pipeline = loadDefinitionSync(path.join(dir, "pipeline.yaml"));
 
 export default {
   id: "demo-pipeline",

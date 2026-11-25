@@ -30,6 +30,7 @@ test("the package root exports the core", () => {
     "createRegistry",
     "explore",
     "loadDefinition",
+    "loadDefinitionSync",
     "openSqliteStore",
     "parseScript",
     "renderMermaid",

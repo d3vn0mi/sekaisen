@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { readFile, realpath } from "node:fs/promises";
+import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { parse } from "yaml";
 import {
@@ -418,9 +417,17 @@ function buildDefinition(
  * that cannot be parsed or fails the schema yields an empty definition.
  */
 export async function loadDefinition(file: string): Promise<LoadedDefinition> {
+  return loadDefinitionSync(file);
+}
+
+/**
+ * {@link loadDefinition} without the promise, for code that cannot wait: an
+ * OpenClaw plugin's module and its `register` must both run synchronously.
+ */
+export function loadDefinitionSync(file: string): LoadedDefinition {
   const abs = path.resolve(file);
   const dir = path.dirname(abs);
-  const bytes = await readFile(abs);
+  const bytes = readFileSync(abs);
   const problems: string[] = [];
   const briefs: Record<string, string> = {};
   const result = (def: Definition, hash: string): LoadedDefinition => ({
@@ -468,7 +475,7 @@ export async function loadDefinition(file: string): Promise<LoadedDefinition> {
   const hash = createHash("sha256").update(bytes);
   // Symlinks are followed before the folder test, so a link cannot lead a
   // brief out of the folder; the folder itself may sit under a link.
-  const realDir = await realpath(dir);
+  const realDir = realpathSync(dir);
   for (const rel of referencedBriefs(def)) {
     const target = path.resolve(dir, rel);
     if (path.isAbsolute(rel) || !isInside(dir, target)) {
@@ -477,7 +484,7 @@ export async function loadDefinition(file: string): Promise<LoadedDefinition> {
     }
     let real: string;
     try {
-      real = await realpath(target);
+      real = realpathSync(target);
     } catch {
       problems.push(`brief ${rel}: cannot be read`);
       continue;
@@ -487,7 +494,7 @@ export async function loadDefinition(file: string): Promise<LoadedDefinition> {
       continue;
     }
     try {
-      const text = await readFile(real);
+      const text = readFileSync(real);
       briefs[rel] = text.toString("utf8");
       hash.update(`\0${rel}\0`).update(text);
     } catch {

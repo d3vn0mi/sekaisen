@@ -32,6 +32,8 @@ Pre-0.1. Nothing is installable yet.
   - A successful run's summary is no longer reported as its error.
   - In the default session key, a project name keeps only `[a-z0-9_-]`; other characters become `-`.
   - A gate answered by button records `resolved_by` as `<channel>:<senderId>`, the operator who pressed.
+  - `loadDefinitionSync`, the synchronous form of `loadDefinition`. OpenClaw loads a plugin module
+    synchronously and refuses a `register` that returns a promise, so a plugin loads its pipelines with it.
   - `defaultSessionKey` and the types `Logger`, `ServiceDefinition` and `InteractiveHandlerDefinition`
     are exported from `sekaisen/openclaw`.
 - A `gate_reminder` engine event, with the gate's prompt and outcomes and a `reminder` count from 1. An

@@ -24,7 +24,11 @@ export {
   type Timers,
 } from "./engine/engine.js";
 export type { JsonSchema } from "./format/jsonschema.js";
-export { type LoadedDefinition, loadDefinition } from "./format/load.js";
+export {
+  type LoadedDefinition,
+  loadDefinition,
+  loadDefinitionSync,
+} from "./format/load.js";
 export type {
   ActionStage,
   AgentStage,

@@ -18,7 +18,9 @@ build fails at the `createPipelinePlugin` call, which is where you want to hear 
 
 ## Hosting a pipeline
 
-`createPipelinePlugin` builds the engine and registers everything with the gateway:
+`createPipelinePlugin` builds the engine and registers everything with the gateway. OpenClaw loads a
+plugin module synchronously and refuses a `register` that returns a promise, so neither may wait: load
+pipeline files with `loadDefinitionSync`, not `loadDefinition`, at the top of the module or in `register`.
 
 ```ts
 import { createPipelinePlugin } from "sekaisen/openclaw";

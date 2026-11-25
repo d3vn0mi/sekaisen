@@ -10,7 +10,10 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { loadDefinition } from "../../../src/format/load.js";
+import {
+  loadDefinition,
+  loadDefinitionSync,
+} from "../../../src/format/load.js";
 import { parseDuration } from "../../../src/format/types.js";
 
 const FIXTURE = path.resolve("test/fixtures/defs/review-loop");
@@ -622,4 +625,11 @@ describe("loadDefinition", () => {
     const { problems } = await loadDefinition(file);
     expect(problems).toEqual([]);
   });
+});
+
+test("the sync loader returns what the async one does, briefs and hash included", async () => {
+  const file = path.join(FIXTURE, "pipeline.yaml");
+  const sync = loadDefinitionSync(file);
+  expect(sync).toEqual(await loadDefinition(file));
+  expect(Object.keys(sync.briefs).length).toBeGreaterThan(0);
 });
