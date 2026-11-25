@@ -132,6 +132,35 @@ describe("readRunOutcome", () => {
     expect(await a.readRunOutcome("run-1")).toEqual({ state: "unknown" });
   });
 
+  test.each([
+    "Gateway is draining; new tasks are not accepted",
+    "gateway is draining for restart",
+  ])(
+    "a run that ends with the drain error %j reads unknown, as a lost turn",
+    async (error) => {
+      const { a } = setup([row({ status: "failed", error })]);
+      expect(await a.readRunOutcome("run-1")).toEqual({ state: "unknown" });
+    },
+  );
+
+  test("a drain error the adapter caused by cancelling still reads killed", async () => {
+    const { a } = setup([
+      row({ status: "failed", error: "gateway is draining for restart" }),
+    ]);
+    (a as unknown as { aborted: Set<string> }).aborted.add("run-1");
+    expect(await a.readRunOutcome("run-1")).toMatchObject({ ending: "killed" });
+  });
+
+  test("an error that only mentions draining elsewhere stays an error", async () => {
+    const { a } = setup([
+      row({
+        status: "failed",
+        error: "tool failed: the queue said gateway is draining",
+      }),
+    ]);
+    expect(await a.readRunOutcome("run-1")).toMatchObject({ ending: "error" });
+  });
+
   test("after a restart, a lost task reads unknown", async () => {
     const { a } = setup([row({ status: "lost" })]);
     expect(a.agentOf("run-1")).toBeUndefined();

@@ -31,6 +31,12 @@ const NOT_ALLOWED = "by agents.defaults.modelPolicy.allow";
 /** OpenClaw's stop reason and error text for a turn cut by a gateway restart. */
 const RESTART_STOP_REASON = "restart";
 const RESTART_ABORT_ERROR = "agent run aborted for restart";
+/**
+ * OpenClaw's GatewayDrainingError: "Gateway is draining; new tasks are not
+ * accepted" or "gateway is draining for restart". A turn whose model call
+ * fails over while the gateway drains ends with this error, not the abort.
+ */
+const DRAINING_ERROR = /^gateway is draining\b/i;
 
 /**
  * The default mapping from the engine's session keys to OpenClaw's. A
@@ -294,7 +300,9 @@ function isRestartAbort(
   error: string | undefined,
 ): boolean {
   return (
-    waited?.stopReason === RESTART_STOP_REASON || error === RESTART_ABORT_ERROR
+    waited?.stopReason === RESTART_STOP_REASON ||
+    error === RESTART_ABORT_ERROR ||
+    (error !== undefined && DRAINING_ERROR.test(error))
   );
 }
 

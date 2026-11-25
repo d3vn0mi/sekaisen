@@ -18,7 +18,8 @@ Pre-0.1. Nothing is installable yet.
   buttons. Documented in [`docs/openclaw.md`](docs/openclaw.md), with an example plugin in
   [`docs/examples/openclaw-plugin`](docs/examples/openclaw-plugin).
   - A turn cut by a gateway restart reads `unknown`, as a lost turn the engine retries, unless the
-    adapter cancelled it, which still reads `killed`.
+    adapter cancelled it, which still reads `killed`. So does a turn that ends with OpenClaw's drain
+    error, which a model fallback during the restart's drain leaves in place of the abort.
   - The owner session for reads and cancels follows the config's `session.mainKey`, as OpenClaw builds
     it; `ownerKey(agent)` overrides it.
   - `createPipelinePlugin` opens its store and builds its engine only in a full registration. Other

@@ -191,7 +191,9 @@ a run as an error.
 ## After a restart
 
 A gateway restart cuts the turns in flight. OpenClaw marks each one failed, with the stop reason
-`restart` and the error "agent run aborted for restart". The adapter reads such a run as `unknown`,
+`restart` and the error "agent run aborted for restart". A turn whose model call fails over while the
+gateway drains ends instead with OpenClaw's drain error ("Gateway is draining; new tasks are not
+accepted", or "gateway is draining for restart"). The adapter reads either kind as `unknown`,
 the same as a lost turn, unless it cancelled the run itself. The engine reconciles its turns when it
 starts, records that attempt as lost, and retries it under the stage's retry rules (by default, a
 lost turn is retried). Outside start-up, a turn read as `unknown` is left to its deadline.
