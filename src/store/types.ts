@@ -236,6 +236,13 @@ export interface StoreTx {
   getStageRun(stageRunId: string): StageRunRow | undefined;
   /** The newest stage run of the run that is submitted, working or input_required. */
   liveStageRun(runId: string): StageRunRow | undefined;
+  /** The stage run of one visit's retry index, or undefined when there is none. */
+  findStageRun(key: {
+    runId: string;
+    stage: string;
+    visit: number;
+    retryIndex: number;
+  }): StageRunRow | undefined;
   /**
    * Oldest first. `inFlight` keeps only stage runs with a turn in flight,
    * least recently observed first (never observed before any).

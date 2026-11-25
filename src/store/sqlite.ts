@@ -406,6 +406,24 @@ class SqliteTx implements StoreTx {
     return r && stageRunFromRow(r);
   }
 
+  findStageRun(key: {
+    runId: string;
+    stage: string;
+    visit: number;
+    retryIndex: number;
+  }): StageRunRow | undefined {
+    const r = this.get(
+      `SELECT * FROM stage_runs
+       WHERE run_id = ? AND stage = ? AND visit = ? AND retry_index = ?
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+      key.runId,
+      key.stage,
+      key.visit,
+      key.retryIndex,
+    );
+    return r && stageRunFromRow(r);
+  }
+
   listStageRuns(filter: {
     runId?: string;
     state?: StageRunState[];

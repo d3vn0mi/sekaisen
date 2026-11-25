@@ -301,6 +301,36 @@ describe("persistence", () => {
   });
 });
 
+describe("findStageRun", () => {
+  it("filters by run, stage, visit and retry index", () => {
+    const store = open();
+    store.tx((t) => {
+      seed(t);
+      const add = (id: string, over: Partial<NewStageRun>) =>
+        t.insertStageRun(stageRun({ stageRunId: id, ...over }));
+      add("a", { attempt: 1, visit: 1, retryIndex: 0, ending: "lost" });
+      add("b", { attempt: 2, visit: 1, retryIndex: 1, ending: "timeout" });
+      add("c", { attempt: 3, visit: 2, retryIndex: 0, ending: "no_result" });
+      add("d", { stage: "other", visit: 1, retryIndex: 0 });
+      const find = (over: object) =>
+        t.findStageRun({
+          runId: "r1",
+          stage: "draft",
+          visit: 1,
+          retryIndex: 0,
+          ...over,
+        })?.stageRunId;
+      expect(find({})).toBe("a");
+      expect(find({ retryIndex: 1 })).toBe("b");
+      expect(find({ visit: 2 })).toBe("c");
+      expect(find({ stage: "other" })).toBe("d");
+      expect(find({ retryIndex: 2 })).toBeUndefined();
+      expect(find({ visit: 3 })).toBeUndefined();
+      expect(find({ runId: "nope" })).toBeUndefined();
+    });
+  });
+});
+
 describe("rows", () => {
   it("round-trips every row type", () => {
     const store = open();

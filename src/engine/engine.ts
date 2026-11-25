@@ -1275,14 +1275,12 @@ export class Engine {
     brief: { text: string } | { refused: string },
   ): { text: string } | { refused: string } {
     if ("refused" in brief || row.retryIndex === 0) return brief;
-    const previous = t
-      .listStageRuns({ runId: row.runId, limit: 1000 })
-      .find(
-        (s) =>
-          s.stage === row.stage &&
-          s.visit === row.visit &&
-          s.retryIndex === row.retryIndex - 1,
-      );
+    const previous = t.findStageRun({
+      runId: row.runId,
+      stage: row.stage,
+      visit: row.visit,
+      retryIndex: row.retryIndex - 1,
+    });
     return { text: withRetryNote(brief.text, previous?.ending) };
   }
 
