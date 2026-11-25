@@ -157,6 +157,16 @@ describe("a pin refusal at the end of a run", () => {
     expect(a.agentOf("k1")).toBeUndefined();
   });
 
+  test("a dispatched run with no ledger row that the draining gateway refused reads unknown", async () => {
+    const { s, a } = setup([]);
+    await a.startTurn(turn("k1"));
+    s.waits.set("k1", {
+      status: "error",
+      error: "Gateway is draining; new tasks are not accepted",
+    });
+    expect(await a.readRunOutcome("k1")).toEqual({ state: "unknown" });
+  });
+
   test("a dispatched run with no ledger row and any other error keeps its text", async () => {
     const { s, a } = setup([]);
     await a.startTurn(turn("k1"));

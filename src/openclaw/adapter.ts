@@ -168,7 +168,7 @@ export class OpenClawAdapter implements HarnessAdapter {
       error = texts.find((t) => refusalLine(t) !== undefined) ?? texts[0];
       // A turn cut by a gateway restart was lost, not failed: the engine
       // retries a lost turn. One this adapter cancelled stays killed.
-      if (!wasAborted && isRestartAbort(waited, error)) {
+      if (!wasAborted && isRestartAbort(waited, texts)) {
         this.owners.delete(runId);
         return { state: "unknown" };
       }
@@ -191,7 +191,7 @@ export class OpenClawAdapter implements HarnessAdapter {
   private async readUnlisted(runId: string): Promise<RunOutcome> {
     if (!this.owners.has(runId)) return { state: "unknown" };
     const waited = await this.waitResult(runId);
-    if (waited?.status !== "error" || isRestartAbort(waited, waited.error)) {
+    if (waited?.status !== "error" || isRestartAbort(waited, [waited.error])) {
       return { state: "unknown" };
     }
     this.owners.delete(runId);
@@ -294,15 +294,21 @@ export class OpenClawAdapter implements HarnessAdapter {
   }
 }
 
-/** True for a turn OpenClaw aborted because the gateway restarted. */
+/**
+ * True for a turn OpenClaw aborted because the gateway restarted, or one the
+ * draining gateway refused, judged by its stop reason or any of its error texts.
+ */
 function isRestartAbort(
   waited: AgentWaitResult | undefined,
-  error: string | undefined,
+  errors: readonly (string | undefined)[],
 ): boolean {
   return (
     waited?.stopReason === RESTART_STOP_REASON ||
-    error === RESTART_ABORT_ERROR ||
-    (error !== undefined && DRAINING_ERROR.test(error))
+    errors.some(
+      (e) =>
+        e !== undefined &&
+        (e === RESTART_ABORT_ERROR || DRAINING_ERROR.test(e)),
+    )
   );
 }
 

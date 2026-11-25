@@ -143,6 +143,17 @@ describe("readRunOutcome", () => {
     },
   );
 
+  test("a drain error in the row reads unknown even when waitForRun has other text", async () => {
+    const { s, a } = setup([
+      row({ status: "failed", error: "gateway is draining for restart" }),
+    ]);
+    s.waits.set("run-1", {
+      status: "error",
+      error: "Claude Code process exited with code 143",
+    });
+    expect(await a.readRunOutcome("run-1")).toEqual({ state: "unknown" });
+  });
+
   test("a drain error the adapter caused by cancelling still reads killed", async () => {
     const { a } = setup([
       row({ status: "failed", error: "gateway is draining for restart" }),
